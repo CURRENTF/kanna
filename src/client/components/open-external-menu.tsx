@@ -194,9 +194,9 @@ export function OpenExternalSelect({
             size="none"
             onClick={() => handleOpenValue(lastValue)}
             title={`Open in ${getOpenAppLabel(lastValue, isMac)}`}
-            className="border-0 !pl-2.5 !pr-1 hover:!border-border/0 hover:!bg-transparent"
+            className="border-0 p-1 py-[3px] pr-0 hover:!border-border/0 hover:!bg-transparent"
           >
-            <OpenAppIcon value={lastValue} isMac={isMac} className="size-6" />
+            <OpenAppIcon value={lastValue} isMac={isMac} className="size-5.5" />
           </Button>
         </HotkeyTooltipTrigger>
         <HotkeyTooltipContent
@@ -207,11 +207,11 @@ export function OpenExternalSelect({
       <Select value={undefined} onValueChange={(value) => handleOpenValue(value as OpenAppValue)}>
         <SelectTrigger
           aria-label="Choose open destination"
-          className="!pl-1 !pr-2.5 border-0 bg-transparent hover:bg-transparent focus:ring-0 focus:ring-offset-0 [&>svg]:hidden"
+          className="!h-auto !py-0 !pl-0.5 !pr-1 border-0 bg-transparent hover:bg-transparent focus:ring-0 focus:ring-offset-0 [&>svg]:hidden"
         >
-          <span className="flex items-center justify-center">
+          <div className="flex items-center justify-center size-5">
             <ChevronDown className="h-4 w-4 opacity-60" />
-          </span>
+          </div>
         </SelectTrigger>
         <SelectContent align="end">
           <SelectGroup>

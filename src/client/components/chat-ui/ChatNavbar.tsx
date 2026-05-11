@@ -153,33 +153,33 @@ export function ChatNavbar({
   return (
     <CardHeader
       className={cn(
-        "absolute top-0 left-0 right-0 z-10 md:pt-3 px-3 border-border/0 md:pb-0 flex items-center justify-center",
+        "absolute top-0 left-0 right-0 z-10 pt-3 pl-1 pr-2 border-border/0 md:pb-0 flex items-center justify-center",
         " bg-gradient-to-b from-background/70"
       )}
     >
       <div className="relative flex items-center gap-2 w-full">
-        <div className={`flex items-center gap-1 flex-shrink-0 border border-border/0 rounded-2xl ${sidebarCollapsed ? 'px-1.5  border-border' : ''} p-1 backdrop-blur-lg`}>
+        <div className={`h-[30px] flex items-center gap-0 flex-shrink-0 border border-border/0 rounded-[9px] ${sidebarCollapsed ? 'px-1.5  border-border' : ''} px-[2px] backdrop-blur-lg`}>
           <Button
             variant="ghost"
             size="icon"
-            className="md:hidden"
+            className="md:hidden !h-[auto] hover:!border-border/0 hover:!bg-transparent"
             onClick={onOpenSidebar}
           >
-            <Menu className="size-4.5" />
+            <Menu className="size-4" />
           </Button>
           {sidebarCollapsed && (
             <>
-              <div className="flex items-center justify-center w-[36px] h-[36px]">
+              <div className="hidden md:flex items-center justify-center w-[36px] h-[36px]">
                 <Flower className="h-4 w-4 sm:h-5 sm:w-5 text-logo ml-1 hidden md:block" />
               </div>
               <Button
                 variant="ghost"
                 size="icon"
-                className="hidden md:flex"
+                className="hidden md:flex  hover:!border-border/0 hover:!bg-transparent"
                 onClick={onExpandSidebar}
                 title="Expand sidebar"
               >
-                <PanelLeft className="size-4.5" />
+                <PanelLeft className="size-4" />
               </Button>
             </>
           )}
@@ -190,7 +190,7 @@ export function ChatNavbar({
             onClick={onNewChat}
             title="Compose"
           >
-            <SquarePen className="size-4.5" />
+            <SquarePen className="size-4" />
           </Button>
         </div>
 
@@ -199,7 +199,7 @@ export function ChatNavbar({
         {localPath && (onOpenExternal || onToggleEmbeddedTerminal || onToggleRightSidebar || onExportTranscript) ? (
           <div className="flex items-center gap-2 flex-shrink-0">
             {onOpenExternal ? (
-              <div className="hidden py-0.5 md:block border border-border rounded-2xl backdrop-blur-lg">
+              <div className="hidden md:block border border-border/70 rounded-[9px] backdrop-blur-lg">
                 <OpenExternalSelect
                   isMac={isMac}
                   editorPreset={editorPreset}
@@ -211,7 +211,7 @@ export function ChatNavbar({
               </div>
             ) : null}
             {(onToggleEmbeddedTerminal || onToggleRightSidebar || onExportTranscript) ? (
-              <div className="flex items-center border border-border rounded-2xl px-2 py-0.5 backdrop-blur-lg">
+              <div className="flex items-center  rounded-[9px] h-[30px] backdrop-blur-lg">
                 <NavbarOverflowMenu
                   showOnDesktop={rightSidebarVisible}
                   onToggleEmbeddedTerminal={onToggleEmbeddedTerminal}
@@ -233,7 +233,7 @@ export function ChatNavbar({
                         embeddedTerminalVisible && "text-foreground"
                       )}
                     >
-                      <Terminal strokeWidth={2} className="h-4.5" />
+                      <Terminal strokeWidth={2} className="h-4" />
                     </Button>
                   </HotkeyTooltipTrigger>
                   <HotkeyTooltipContent side="bottom" shortcut={terminalShortcut} />
@@ -253,11 +253,11 @@ export function ChatNavbar({
                     )}
                   >
                     {isExportingTranscript ? (
-                      <Loader2 className="h-4.5 animate-spin" />
+                      <Loader2 className="h-4 animate-spin" />
                     ) : exportTranscriptComplete ? (
-                      <Check className="h-4.5 text-emerald-400" />
+                      <Check className="h-4 text-emerald-400" />
                     ) : (
-                      <UserRoundPlus strokeWidth={2} className="h-4.5" />
+                      <UserRoundPlus strokeWidth={2} className="h-4" />
                     )}
                   </Button>
                 ) : null}
