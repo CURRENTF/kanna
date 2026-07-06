@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { PROVIDERS } from "../../../shared/types"
-import { ChatInput, IME_COMPOSITION_END_GRACE_MS, getClipboardImageFiles, isImeComposingKeyEvent, trimTrailingPastedNewlines, willExceedAttachmentLimit } from "./ChatInput"
+import { ChatInput, IME_COMPOSITION_END_GRACE_MS, getClipboardImageFiles, isImeComposingKeyEvent, isWithinImeCompositionEndGrace, trimTrailingPastedNewlines, willExceedAttachmentLimit } from "./ChatInput"
 
 function createClipboardItem(args: {
   kind?: string
@@ -165,6 +165,11 @@ describe("isImeComposingKeyEvent", () => {
   })
 
   test("suppresses Enter immediately after composition ends", () => {
+    expect(isWithinImeCompositionEndGrace(
+      1_000,
+      1_000 + IME_COMPOSITION_END_GRACE_MS - 1,
+    )).toBe(true)
+
     expect(isImeComposingKeyEvent({
       key: "Enter",
       nativeEvent: { isComposing: false, keyCode: 13, which: 13 },
@@ -175,6 +180,11 @@ describe("isImeComposingKeyEvent", () => {
   })
 
   test("allows regular Enter after the composition grace window", () => {
+    expect(isWithinImeCompositionEndGrace(
+      1_000,
+      1_000 + IME_COMPOSITION_END_GRACE_MS,
+    )).toBe(false)
+
     expect(isImeComposingKeyEvent({
       key: "Enter",
       nativeEvent: { isComposing: false, keyCode: 13, which: 13 },

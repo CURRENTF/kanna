@@ -47,6 +47,12 @@ export function willExceedAttachmentLimit(args: {
   return args.currentAttachmentCount + args.queuedAttachmentCount + args.incomingAttachmentCount > maxAttachments
 }
 
+export function isWithinImeCompositionEndGrace(lastCompositionEndAt: number | undefined, now = Date.now()) {
+  return lastCompositionEndAt
+    ? now - lastCompositionEndAt < IME_COMPOSITION_END_GRACE_MS
+    : false
+}
+
 export function isImeComposingKeyEvent(event: {
   key: string
   nativeEvent?: {
@@ -60,9 +66,7 @@ export function isImeComposingKeyEvent(event: {
   now?: number
 } = {}) {
   const now = options.now ?? Date.now()
-  const endedRecently = options.lastCompositionEndAt
-    ? now - options.lastCompositionEndAt < IME_COMPOSITION_END_GRACE_MS
-    : false
+  const endedRecently = isWithinImeCompositionEndGrace(options.lastCompositionEndAt, now)
 
   if (options.isComposing || endedRecently) {
     return true
@@ -610,21 +614,30 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       return
     }
 
-    const isTouchDevice = "ontouchstart" in window || navigator.maxTouchPoints > 0
-    if (
-      event.key === "Enter"
-      && !event.shiftKey
-      && !isImeComposingKeyEvent(event, {
+    if (event.key === "Enter" && !event.shiftKey) {
+      const now = Date.now()
+      const endedCompositionRecently = isWithinImeCompositionEndGrace(lastCompositionEndAtRef.current, now)
+      if (isImeComposingKeyEvent(event, {
         isComposing: isComposingRef.current,
         lastCompositionEndAt: lastCompositionEndAtRef.current,
-      })
-      && !isTouchDevice
-      && !disabled
-      && hasTextToSend
-      && !hasPendingUploads
-    ) {
-      event.preventDefault()
-      void handleSubmit()
+        now,
+      })) {
+        if (endedCompositionRecently) {
+          event.preventDefault()
+        }
+        return
+      }
+
+      const isTouchDevice = "ontouchstart" in window || navigator.maxTouchPoints > 0
+      if (
+        !isTouchDevice
+        && !disabled
+        && hasTextToSend
+        && !hasPendingUploads
+      ) {
+        event.preventDefault()
+        void handleSubmit()
+      }
     }
   }
 
