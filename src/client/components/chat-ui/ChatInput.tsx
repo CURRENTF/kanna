@@ -28,6 +28,7 @@ import { overrideContextWindowMaxTokens, type ContextWindowSnapshot } from "../.
 
 const MAX_FILES_PER_DROP = 50
 const MAX_CONCURRENT_UPLOADS = 3
+export const IME_COMPOSITION_END_GRACE_MS = 250
 
 const CLIPBOARD_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
   "image/gif": "gif",
@@ -53,7 +54,20 @@ export function isImeComposingKeyEvent(event: {
     keyCode?: number
     which?: number
   }
-}) {
+}, options: {
+  isComposing?: boolean
+  lastCompositionEndAt?: number
+  now?: number
+} = {}) {
+  const now = options.now ?? Date.now()
+  const endedRecently = options.lastCompositionEndAt
+    ? now - options.lastCompositionEndAt < IME_COMPOSITION_END_GRACE_MS
+    : false
+
+  if (options.isComposing || endedRecently) {
+    return true
+  }
+
   return Boolean(
     event.nativeEvent?.isComposing
       || event.nativeEvent?.keyCode === 229
@@ -221,6 +235,8 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const composerState = storedComposerState ?? getComposerState(composerChatId)
   const [value, setValue] = useState(() => (chatId ? getDraft(chatId) : ""))
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const isComposingRef = useRef(false)
+  const lastCompositionEndAtRef = useRef(0)
   const isStandalone = useIsStandalone()
   const [attachments, setAttachments] = useState<ComposerAttachment[]>(() => hydrateComposerAttachments(chatId ? getAttachmentDrafts(chatId) : []))
   const [selectedAttachmentId, setSelectedAttachmentId] = useState<string | null>(null)
@@ -595,7 +611,18 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
 
     const isTouchDevice = "ontouchstart" in window || navigator.maxTouchPoints > 0
-    if (event.key === "Enter" && !event.shiftKey && !isImeComposingKeyEvent(event) && !isTouchDevice && !disabled && hasTextToSend && !hasPendingUploads) {
+    if (
+      event.key === "Enter"
+      && !event.shiftKey
+      && !isImeComposingKeyEvent(event, {
+        isComposing: isComposingRef.current,
+        lastCompositionEndAt: lastCompositionEndAtRef.current,
+      })
+      && !isTouchDevice
+      && !disabled
+      && hasTextToSend
+      && !hasPendingUploads
+    ) {
       event.preventDefault()
       void handleSubmit()
     }
@@ -738,6 +765,13 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 autoResize()
               }}
               onPaste={handlePaste}
+              onCompositionStart={() => {
+                isComposingRef.current = true
+              }}
+              onCompositionEnd={() => {
+                isComposingRef.current = false
+                lastCompositionEndAtRef.current = Date.now()
+              }}
               onKeyDown={handleKeyDown}
               disabled={disabled}
               className="flex-1 text-base p-3 md:p-4 !pr-2 pl-0 md:pl-6 resize-none max-h-[200px] outline-none bg-transparent border-0 shadow-none"

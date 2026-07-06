@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { PROVIDERS } from "../../../shared/types"
-import { ChatInput, getClipboardImageFiles, isImeComposingKeyEvent, trimTrailingPastedNewlines, willExceedAttachmentLimit } from "./ChatInput"
+import { ChatInput, IME_COMPOSITION_END_GRACE_MS, getClipboardImageFiles, isImeComposingKeyEvent, trimTrailingPastedNewlines, willExceedAttachmentLimit } from "./ChatInput"
 
 function createClipboardItem(args: {
   kind?: string
@@ -152,6 +152,35 @@ describe("isImeComposingKeyEvent", () => {
     expect(isImeComposingKeyEvent({
       key: "Enter",
       nativeEvent: { isComposing: false, keyCode: 13, which: 13 },
+    })).toBe(false)
+  })
+
+  test("detects composition state tracked outside the keydown event", () => {
+    expect(isImeComposingKeyEvent({
+      key: "Enter",
+      nativeEvent: { isComposing: false, keyCode: 13, which: 13 },
+    }, {
+      isComposing: true,
+    })).toBe(true)
+  })
+
+  test("suppresses Enter immediately after composition ends", () => {
+    expect(isImeComposingKeyEvent({
+      key: "Enter",
+      nativeEvent: { isComposing: false, keyCode: 13, which: 13 },
+    }, {
+      lastCompositionEndAt: 1_000,
+      now: 1_000 + IME_COMPOSITION_END_GRACE_MS - 1,
+    })).toBe(true)
+  })
+
+  test("allows regular Enter after the composition grace window", () => {
+    expect(isImeComposingKeyEvent({
+      key: "Enter",
+      nativeEvent: { isComposing: false, keyCode: 13, which: 13 },
+    }, {
+      lastCompositionEndAt: 1_000,
+      now: 1_000 + IME_COMPOSITION_END_GRACE_MS,
     })).toBe(false)
   })
 })
