@@ -46,6 +46,22 @@ export function willExceedAttachmentLimit(args: {
   return args.currentAttachmentCount + args.queuedAttachmentCount + args.incomingAttachmentCount > maxAttachments
 }
 
+export function isImeComposingKeyEvent(event: {
+  key: string
+  nativeEvent?: {
+    isComposing?: boolean
+    keyCode?: number
+    which?: number
+  }
+}) {
+  return Boolean(
+    event.nativeEvent?.isComposing
+      || event.nativeEvent?.keyCode === 229
+      || event.nativeEvent?.which === 229
+      || event.key === "Process"
+  )
+}
+
 type ClipboardFileItem = Pick<DataTransferItem, "kind" | "type" | "getAsFile">
 
 function hasClipboardTextPayload(clipboardData: DataTransfer | null | undefined) {
@@ -579,7 +595,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
     }
 
     const isTouchDevice = "ontouchstart" in window || navigator.maxTouchPoints > 0
-    if (event.key === "Enter" && !event.shiftKey && !isTouchDevice && !disabled && hasTextToSend && !hasPendingUploads) {
+    if (event.key === "Enter" && !event.shiftKey && !isImeComposingKeyEvent(event) && !isTouchDevice && !disabled && hasTextToSend && !hasPendingUploads) {
       event.preventDefault()
       void handleSubmit()
     }

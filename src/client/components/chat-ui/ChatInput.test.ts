@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { PROVIDERS } from "../../../shared/types"
-import { ChatInput, getClipboardImageFiles, trimTrailingPastedNewlines, willExceedAttachmentLimit } from "./ChatInput"
+import { ChatInput, getClipboardImageFiles, isImeComposingKeyEvent, trimTrailingPastedNewlines, willExceedAttachmentLimit } from "./ChatInput"
 
 function createClipboardItem(args: {
   kind?: string
@@ -118,6 +118,41 @@ describe("trimTrailingPastedNewlines", () => {
 
   test("leaves text without trailing newlines unchanged", () => {
     expect(trimTrailingPastedNewlines("hello")).toBe("hello")
+  })
+})
+
+describe("isImeComposingKeyEvent", () => {
+  test("detects Enter keydown events that are still committing IME text", () => {
+    expect(isImeComposingKeyEvent({
+      key: "Enter",
+      nativeEvent: { isComposing: true },
+    })).toBe(true)
+  })
+
+  test("detects browsers that report IME keydown events with keyCode 229", () => {
+    expect(isImeComposingKeyEvent({
+      key: "Enter",
+      nativeEvent: { keyCode: 229 },
+    })).toBe(true)
+
+    expect(isImeComposingKeyEvent({
+      key: "Enter",
+      nativeEvent: { which: 229 },
+    })).toBe(true)
+  })
+
+  test("detects Process key events from IME input", () => {
+    expect(isImeComposingKeyEvent({
+      key: "Process",
+      nativeEvent: {},
+    })).toBe(true)
+  })
+
+  test("does not treat a regular Enter keydown as IME composition", () => {
+    expect(isImeComposingKeyEvent({
+      key: "Enter",
+      nativeEvent: { isComposing: false, keyCode: 13, which: 13 },
+    })).toBe(false)
   })
 })
 
