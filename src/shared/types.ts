@@ -589,6 +589,25 @@ export interface TodoItem {
   activeForm: string
 }
 
+export type CodexGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete"
+
+export interface CodexGoal {
+  threadId: string
+  objective: string
+  status: CodexGoalStatus
+  tokenBudget: number | null
+  tokensUsed: number
+  timeUsedSeconds: number
+  createdAt: number
+  updatedAt: number
+}
+
 interface TranscriptEntryBase {
   _id: string
   messageId?: string

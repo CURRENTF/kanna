@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { useShallow } from "zustand/react/shallow"
-import { PROVIDERS, type AgentProvider, type AppSettingsPatch, type AppSettingsSnapshot, type AskUserQuestionAnswerMap, type ChatAttachment, type ChatDiffSnapshot, type ChatHistoryPage, type KeybindingsSnapshot, type LlmProviderSnapshot, type LlmProviderValidationResult, type ModelOptions, type ProviderCatalogEntry, type QueuedChatMessage, type StandaloneTranscriptExportCommandResult, type TranscriptEntry, type UpdateInstallResult, type UpdateSnapshot, type UserPromptEntry } from "../../shared/types"
+import { PROVIDERS, type AgentProvider, type AppSettingsPatch, type AppSettingsSnapshot, type AskUserQuestionAnswerMap, type ChatAttachment, type ChatDiffSnapshot, type ChatHistoryPage, type CodexGoal, type CodexGoalStatus, type KeybindingsSnapshot, type LlmProviderSnapshot, type LlmProviderValidationResult, type ModelOptions, type ProviderCatalogEntry, type QueuedChatMessage, type StandaloneTranscriptExportCommandResult, type TranscriptEntry, type UpdateInstallResult, type UpdateSnapshot, type UserPromptEntry } from "../../shared/types"
 import { NEW_CHAT_COMPOSER_ID, type ComposerState, useChatPreferencesStore } from "../stores/chatPreferencesStore"
 import { useRightSidebarStore } from "../stores/rightSidebarStore"
 import { useTerminalLayoutStore } from "../stores/terminalLayoutStore"
@@ -670,6 +670,9 @@ export interface KannaState {
   latestToolIds: ReturnType<typeof getLatestToolIds>
   runtime: ChatSnapshot["runtime"] | null
   runtimeStatus: string | null
+  codexGoal: CodexGoal | null
+  isGoalLoading: boolean
+  isGoalSaving: boolean
   isHistoryLoading: boolean
   hasOlderHistory: boolean
   availableProviders: ProviderCatalogEntry[]
@@ -703,6 +706,9 @@ export interface KannaState {
   handleValidateLlmProvider: (value: Pick<LlmProviderSnapshot, "provider" | "apiKey" | "model" | "baseUrl">) => Promise<LlmProviderValidationResult>
   handleSignOut: () => Promise<void>
   handleSend: (content: string, options?: { provider?: AgentProvider; model?: string; modelOptions?: ModelOptions; planMode?: boolean }) => Promise<void>
+  handleRefreshCodexGoal: () => Promise<CodexGoal | null>
+  handleSaveCodexGoal: (objective: string, status?: CodexGoalStatus | null) => Promise<CodexGoal | null>
+  handleClearCodexGoal: () => Promise<void>
   handleSteerQueuedMessage: (queuedMessageId: string) => Promise<void>
   handleRemoveQueuedMessage: (queuedMessageId: string) => Promise<void>
   handleCancel: () => Promise<void>
@@ -756,6 +762,9 @@ export function useKannaState(activeChatId: string | null): KannaState {
   const [keybindings, setKeybindings] = useState<KeybindingsSnapshot | null>(null)
   const [appSettings, setAppSettings] = useState<AppSettingsSnapshot | null>(null)
   const [llmProvider, setLlmProvider] = useState<LlmProviderSnapshot | null>(null)
+  const [codexGoal, setCodexGoal] = useState<CodexGoal | null>(null)
+  const [isGoalLoading, setIsGoalLoading] = useState(false)
+  const [isGoalSaving, setIsGoalSaving] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<SocketStatus>("connecting")
   const [sidebarReady, setSidebarReady] = useState(false)
   const [localProjectsReady, setLocalProjectsReady] = useState(false)
@@ -1100,6 +1109,36 @@ export function useKannaState(activeChatId: string | null): KannaState {
       unsubscribe()
     }
   }, [activeChatId, socket])
+
+  useEffect(() => {
+    let cancelled = false
+    const runtime = chatSnapshot?.runtime
+    if (!activeChatId || runtime?.provider !== "codex" || !runtime.sessionToken || connectionStatus !== "connected") {
+      setCodexGoal(null)
+      setIsGoalLoading(false)
+      return
+    }
+
+    setIsGoalLoading(true)
+    void socket.command<{ goal: CodexGoal | null }>({
+      type: "chat.goal.get",
+      chatId: activeChatId,
+    }).then((result) => {
+      if (cancelled) return
+      setCodexGoal(result.goal)
+      setCommandError(null)
+    }).catch((error) => {
+      if (cancelled) return
+      setCommandError(error instanceof Error ? error.message : String(error))
+    }).finally(() => {
+      if (cancelled) return
+      setIsGoalLoading(false)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeChatId, chatSnapshot?.runtime.provider, chatSnapshot?.runtime.sessionToken, connectionStatus, socket])
 
   useEffect(() => {
     if (selectedProjectId) return
@@ -1652,6 +1691,64 @@ export function useKannaState(activeChatId: string | null): KannaState {
     }
   }, [activeChatId, fallbackLocalProjectPath, isProcessing, navigate, optimisticUserPrompts, selectedProjectId, serverTranscriptEntries, sidebarProjectGroups, socket])
 
+  const handleRefreshCodexGoal = useCallback(async () => {
+    if (!activeChatId) return null
+    setIsGoalLoading(true)
+    try {
+      const result = await socket.command<{ goal: CodexGoal | null }>({
+        type: "chat.goal.get",
+        chatId: activeChatId,
+      })
+      setCodexGoal(result.goal)
+      setCommandError(null)
+      return result.goal
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+      throw error
+    } finally {
+      setIsGoalLoading(false)
+    }
+  }, [activeChatId, socket])
+
+  const handleSaveCodexGoal = useCallback(async (objective: string, status?: CodexGoalStatus | null) => {
+    if (!activeChatId) return null
+    setIsGoalSaving(true)
+    try {
+      const result = await socket.command<{ goal: CodexGoal | null }>({
+        type: "chat.goal.set",
+        chatId: activeChatId,
+        objective,
+        status,
+      })
+      setCodexGoal(result.goal)
+      setCommandError(null)
+      return result.goal
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+      throw error
+    } finally {
+      setIsGoalSaving(false)
+    }
+  }, [activeChatId, socket])
+
+  const handleClearCodexGoal = useCallback(async () => {
+    if (!activeChatId) return
+    setIsGoalSaving(true)
+    try {
+      await socket.command<{ goal: CodexGoal | null }>({
+        type: "chat.goal.clear",
+        chatId: activeChatId,
+      })
+      setCodexGoal(null)
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+      throw error
+    } finally {
+      setIsGoalSaving(false)
+    }
+  }, [activeChatId, socket])
+
   const handleSteerQueuedMessage = useCallback(async (queuedMessageId: string) => {
     if (!activeChatId) return
     try {
@@ -2049,6 +2146,9 @@ export function useKannaState(activeChatId: string | null): KannaState {
     latestToolIds,
     runtime,
     runtimeStatus: effectiveRuntimeStatus,
+    codexGoal,
+    isGoalLoading,
+    isGoalSaving,
     isHistoryLoading,
     hasOlderHistory,
     availableProviders,
@@ -2082,6 +2182,9 @@ export function useKannaState(activeChatId: string | null): KannaState {
     handleValidateLlmProvider,
     handleSignOut,
     handleSend,
+    handleRefreshCodexGoal,
+    handleSaveCodexGoal,
+    handleClearCodexGoal,
     handleSteerQueuedMessage,
     handleRemoveQueuedMessage,
     handleCancel,

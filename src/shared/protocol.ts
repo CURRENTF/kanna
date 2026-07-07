@@ -3,6 +3,8 @@ import type {
   AppSettingsPatch,
   AgentProvider,
   ChatAttachment,
+  CodexGoal,
+  CodexGoalStatus,
   ChatDiffSnapshot,
   ChatHistoryPage,
   ChatSnapshot,
@@ -121,6 +123,15 @@ export type ClientCommand =
   | { type: "chat.archive"; chatId: string }
   | { type: "chat.unarchive"; chatId: string }
   | { type: "chat.delete"; chatId: string }
+  | { type: "chat.goal.get"; chatId: string }
+  | {
+      type: "chat.goal.set"
+      chatId: string
+      objective: string
+      status?: CodexGoalStatus | null
+      tokenBudget?: number | null
+    }
+  | { type: "chat.goal.clear"; chatId: string }
   | { type: "chat.setDraftProtection"; chatIds: string[] }
   | { type: "chat.markRead"; chatId: string }
   | {
@@ -260,7 +271,7 @@ export type ServerSnapshot =
 export type ServerEnvelope =
   | { v: 1; type: "snapshot"; id: string; snapshot: ServerSnapshot }
   | { v: 1; type: "event"; id: string; event: TerminalEvent }
-  | { v: 1; type: "ack"; id: string; result?: unknown | ChatHistoryPage | StandaloneTranscriptExportResult }
+  | { v: 1; type: "ack"; id: string; result?: unknown | ChatHistoryPage | StandaloneTranscriptExportResult | { goal: CodexGoal | null } }
   | { v: 1; type: "error"; id?: string; message: string }
 
 export function isClientEnvelope(value: unknown): value is ClientEnvelope {

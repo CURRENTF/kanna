@@ -18,6 +18,7 @@ import {
   RIGHT_SIDEBAR_MIN_WIDTH_PX,
   useRightSidebarStore,
 } from "../../stores/rightSidebarStore"
+import { NEW_CHAT_COMPOSER_ID, useChatPreferencesStore } from "../../stores/chatPreferencesStore"
 import { DEFAULT_PROJECT_TERMINAL_LAYOUT, useTerminalLayoutStore } from "../../stores/terminalLayoutStore"
 import { useTerminalPreferencesStore } from "../../stores/terminalPreferencesStore"
 import { shouldCloseTerminalPane } from "../terminalLayoutResize"
@@ -28,10 +29,12 @@ import { useTerminalToggleAnimation } from "../useTerminalToggleAnimation"
 import type { KannaState } from "../useKannaState"
 import { getNextMeasuredInputHeight, getTranscriptPaddingBottom } from "../useKannaState"
 import { ChatInputDock } from "./ChatInputDock"
+import { ChatGoalPanel } from "./ChatGoalPanel"
 import { ChatTranscriptViewport } from "./ChatTranscriptViewport"
 import { TerminalWorkspaceShell } from "./TerminalWorkspaceShell"
 import { useChatPageSidebarActions, EMPTY_DIFF_SNAPSHOT } from "./useChatPageSidebarActions"
 import {
+  CHAT_NAVBAR_OFFSET_PX,
   EMPTY_STATE_TEXT,
   EMPTY_STATE_TYPING_INTERVAL_MS,
   hasFileDragTypes,
@@ -480,6 +483,11 @@ export function ChatPage() {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const [pendingTerminalCommands, setPendingTerminalCommands] = useState<Record<string, string>>({})
   const showEmptyState = state.messages.length === 0 && state.runtime?.title === "New Chat"
+  const composerChatId = state.activeChatId ?? NEW_CHAT_COMPOSER_ID
+  const stagedProvider = useChatPreferencesStore((store) => store.getComposerState(composerChatId).provider)
+  const goalPanelProvider = state.runtime?.provider ?? stagedProvider
+  const showGoalPanel = goalPanelProvider === "codex"
+  const transcriptHeaderOffsetPx = showGoalPanel ? CHAT_NAVBAR_OFFSET_PX + 56 : CHAT_NAVBAR_OFFSET_PX
   const projectId = state.activeProjectId
   const projectTerminalLayout = useTerminalLayoutStore((store) => (projectId ? store.projects[projectId] : undefined))
   const terminalLayout = projectTerminalLayout ?? DEFAULT_PROJECT_TERMINAL_LAYOUT
@@ -943,6 +951,16 @@ export function ChatPage() {
           hasGitRepo={state.chatDiffSnapshot?.status !== "no_repo"}
           gitStatus={state.chatDiffSnapshot?.status}
         />
+        <ChatGoalPanel
+          activeProvider={goalPanelProvider}
+          goal={state.codexGoal}
+          isLoading={state.isGoalLoading}
+          isSaving={state.isGoalSaving}
+          disabled={state.isProcessing}
+          onRefresh={state.handleRefreshCodexGoal}
+          onSave={state.handleSaveCodexGoal}
+          onClear={state.handleClearCodexGoal}
+        />
         <ChatTranscriptViewport
           activeChatId={state.activeChatId}
           listRef={transcriptListRef}
@@ -974,6 +992,7 @@ export function ChatPage() {
           isEmptyStateTypingComplete={isEmptyStateTypingComplete}
           isPageFileDragActive={isPageFileDragActive}
           showEmptyState={showEmptyState}
+          headerOffsetPx={transcriptHeaderOffsetPx}
         />
       </CardContent>
 

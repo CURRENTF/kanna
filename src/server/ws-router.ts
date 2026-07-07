@@ -1281,6 +1281,27 @@ export function createWsRouter({
           await broadcastFilteredSnapshots({ includeSidebar: true })
           return
         }
+        case "chat.goal.get": {
+          const goal = await agent.getCodexGoal(command.chatId)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: { goal } })
+          return
+        }
+        case "chat.goal.set": {
+          const goal = await agent.setCodexGoal(command.chatId, {
+            objective: command.objective,
+            status: command.status,
+            tokenBudget: command.tokenBudget,
+          })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: { goal } })
+          await broadcastChatAndSidebar(command.chatId)
+          return
+        }
+        case "chat.goal.clear": {
+          const goal = await agent.clearCodexGoal(command.chatId)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: { goal } })
+          await broadcastChatAndSidebar(command.chatId)
+          return
+        }
         case "chat.markRead": {
           await store.setChatReadState(command.chatId, false)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })

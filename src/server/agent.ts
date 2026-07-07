@@ -3,6 +3,7 @@ import { homedir } from "node:os"
 import type {
   AgentProvider,
   ChatAttachment,
+  CodexGoalStatus,
   ContextWindowUsageSnapshot,
   ModelOptions,
   NormalizedToolCall,
@@ -746,6 +747,75 @@ export class AgentCoordinator {
       traceId: active.clientTraceId,
       startedAt: active.profilingStartedAt,
     }
+  }
+
+  private async ensureCodexGoalSession(chatId: string, options: { createIfMissing: boolean }) {
+    const chat = this.store.requireChat(chatId)
+    const project = this.store.getProject(chat.projectId)
+    if (!project) {
+      throw new Error("Project not found")
+    }
+    if (chat.provider && chat.provider !== "codex") {
+      throw new Error("Goal controls are available for Codex chats only")
+    }
+    if (!chat.sessionToken && !options.createIfMissing) {
+      return null
+    }
+    if (!chat.provider) {
+      await this.store.setChatProvider(chatId, "codex")
+    }
+
+    const model = getServerProviderCatalog("codex").defaultModel
+    const sessionToken = await this.codexManager.startSession({
+      chatId,
+      cwd: project.localPath,
+      model,
+      sessionToken: chat.sessionToken,
+      serviceTier: undefined,
+    })
+    if (sessionToken && sessionToken !== chat.sessionToken) {
+      await this.store.setSessionToken(chatId, sessionToken)
+    }
+    return { sessionToken }
+  }
+
+  async getCodexGoal(chatId: string) {
+    const session = await this.ensureCodexGoalSession(chatId, { createIfMissing: false })
+    if (!session) {
+      return null
+    }
+    return await this.codexManager.getGoal(chatId)
+  }
+
+  async setCodexGoal(chatId: string, params: {
+    objective: string
+    status?: CodexGoalStatus | null
+    tokenBudget?: number | null
+  }) {
+    if (this.activeTurns.has(chatId)) {
+      throw new Error("Wait for the current turn to finish before editing the goal")
+    }
+    await this.ensureCodexGoalSession(chatId, { createIfMissing: true })
+    const goal = await this.codexManager.setGoal(chatId, {
+      objective: params.objective,
+      status: params.status ?? null,
+      tokenBudget: params.tokenBudget ?? null,
+    })
+    this.emitStateChange(chatId)
+    return goal
+  }
+
+  async clearCodexGoal(chatId: string) {
+    if (this.activeTurns.has(chatId)) {
+      throw new Error("Wait for the current turn to finish before clearing the goal")
+    }
+    const session = await this.ensureCodexGoalSession(chatId, { createIfMissing: false })
+    if (!session) {
+      return null
+    }
+    await this.codexManager.clearGoal(chatId)
+    this.emitStateChange(chatId)
+    return null
   }
 
   async stopDraining(chatId: string) {

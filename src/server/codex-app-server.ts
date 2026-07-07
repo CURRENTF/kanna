@@ -949,6 +949,43 @@ export class CodexAppServerManager {
     }
   }
 
+  async getGoal(chatId: string) {
+    const context = this.requireSession(chatId)
+    if (!context.sessionToken) {
+      return null
+    }
+    const response = await this.sendRequest<ThreadGoalGetResponse>(context, "thread/goal/get", {
+      threadId: context.sessionToken,
+    } satisfies ThreadGoalGetParams)
+    return response.goal
+  }
+
+  async setGoal(
+    chatId: string,
+    params: Omit<ThreadGoalSetParams, "threadId">
+  ) {
+    const context = this.requireSession(chatId)
+    if (!context.sessionToken) {
+      throw new Error("Codex session not started")
+    }
+    const response = await this.sendRequest<ThreadGoalSetResponse>(context, "thread/goal/set", {
+      threadId: context.sessionToken,
+      ...params,
+    } satisfies ThreadGoalSetParams)
+    return response.goal
+  }
+
+  async clearGoal(chatId: string) {
+    const context = this.requireSession(chatId)
+    if (!context.sessionToken) {
+      return false
+    }
+    const response = await this.sendRequest<ThreadGoalClearResponse>(context, "thread/goal/clear", {
+      threadId: context.sessionToken,
+    } satisfies ThreadGoalClearParams)
+    return response.cleared
+  }
+
   private async runGoalSlashCommand(
     context: SessionContext,
     model: string,
@@ -964,23 +1001,18 @@ export class CodexAppServerManager {
 
     let message: string
     if (command.kind === "clear") {
-      const response = await this.sendRequest<ThreadGoalClearResponse>(context, "thread/goal/clear", {
-        threadId: context.sessionToken,
-      } satisfies ThreadGoalClearParams)
-      message = response.cleared ? "Goal cleared." : "No active goal to clear."
+      const cleared = await this.clearGoal(context.chatId)
+      message = cleared ? "Goal cleared." : "No active goal to clear."
     } else if (command.kind === "set") {
-      const response = await this.sendRequest<ThreadGoalSetResponse>(context, "thread/goal/set", {
-        threadId: context.sessionToken,
+      const goal = await this.setGoal(context.chatId, {
         objective: command.objective,
         tokenBudget: null,
-      } satisfies ThreadGoalSetParams)
-      message = `Goal set: ${response.goal.objective}`
+      })
+      message = `Goal set: ${goal.objective}`
     } else {
-      const response = await this.sendRequest<ThreadGoalGetResponse>(context, "thread/goal/get", {
-        threadId: context.sessionToken,
-      } satisfies ThreadGoalGetParams)
-      message = response.goal
-        ? `Goal: ${response.goal.objective}\nStatus: ${response.goal.status}`
+      const goal = await this.getGoal(context.chatId)
+      message = goal
+        ? `Goal: ${goal.objective}\nStatus: ${goal.status}`
         : "No active goal."
     }
 

@@ -1,7 +1,7 @@
 // Minimal typed subset vendored from `codex app-server generate-ts`.
 // Keep names and field shapes aligned with the official app-server protocol.
 
-import type { CodexReasoningEffort, ServiceTier } from "../shared/types"
+import type { CodexGoal, CodexGoalStatus, CodexReasoningEffort, ServiceTier } from "../shared/types"
 
 export type CodexRequestId = string | number
 
@@ -90,24 +90,8 @@ export interface TurnInterruptParams {
   turnId: string
 }
 
-export type ThreadGoalStatus =
-  | "active"
-  | "paused"
-  | "blocked"
-  | "usageLimited"
-  | "budgetLimited"
-  | "complete"
-
-export interface ThreadGoal {
-  threadId: string
-  objective: string
-  status: ThreadGoalStatus
-  tokenBudget: number | null
-  tokensUsed: number
-  timeUsedSeconds: number
-  createdAt: number
-  updatedAt: number
-}
+export type ThreadGoalStatus = CodexGoalStatus
+export type ThreadGoal = CodexGoal
 
 export interface ThreadGoalSetParams {
   threadId: string
