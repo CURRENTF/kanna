@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
 import { CodexAppServerManager } from "./codex-app-server"
+import { isServerNotification } from "./codex-app-server-protocol"
 
 class FakeCodexProcess extends EventEmitter {
   readonly stdin = new PassThrough()
@@ -150,6 +151,147 @@ describe("CodexAppServerManager", () => {
       "initialized",
       "thread/fork",
     ])
+  })
+
+  test("accepts official goal notifications", () => {
+    expect(isServerNotification({
+      method: "thread/goal/updated",
+      params: {
+        threadId: "thread-1",
+        turnId: null,
+        goal: {
+          threadId: "thread-1",
+          objective: "ship goal support",
+          status: "active",
+          tokenBudget: null,
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    })).toBe(true)
+
+    expect(isServerNotification({
+      method: "thread/goal/cleared",
+      params: {
+        threadId: "thread-1",
+      },
+    })).toBe(true)
+  })
+
+  test("routes /goal clear to the app-server goal clear request instead of a model turn", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { thread: { id: "thread-1" }, model: "gpt-5.4", reasoningEffort: "high" },
+        })
+      } else if (message.method === "thread/goal/clear") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { cleared: true },
+        })
+        child.writeServerMessage({
+          method: "thread/goal/cleared",
+          params: { threadId: "thread-1" },
+        })
+      } else if (message.method === "turn/start") {
+        throw new Error("/goal clear must not start a model turn")
+      }
+    })
+
+    const manager = new CodexAppServerManager({
+      spawnProcess: () => process as never,
+    })
+
+    await manager.startSession({
+      chatId: "chat-1",
+      cwd: "/tmp/project",
+      model: "gpt-5.4",
+      sessionToken: null,
+    })
+
+    const turn = await manager.startTurn({
+      chatId: "chat-1",
+      model: "gpt-5.4",
+      content: "/goal clear",
+      planMode: false,
+      onToolRequest: async () => ({}),
+    })
+
+    const events = await collectStream(turn.stream)
+    const goalClearRequest = process.messages.find((message: any) => message.method === "thread/goal/clear") as
+      | { method: "thread/goal/clear"; params: { threadId: string } }
+      | undefined
+    expect(goalClearRequest?.params).toEqual({ threadId: "thread-1" })
+    expect(process.messages.some((message: any) => message.method === "turn/start")).toBe(false)
+    expect(events.some((event) =>
+      event.type === "transcript"
+      && event.entry.kind === "assistant_text"
+      && event.entry.text === "Goal cleared."
+    )).toBe(true)
+  })
+
+  test("routes /goal text to the app-server goal set request", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { thread: { id: "thread-1" }, model: "gpt-5.4", reasoningEffort: "high" },
+        })
+      } else if (message.method === "thread/goal/set") {
+        child.writeServerMessage({
+          id: message.id,
+          result: {
+            goal: {
+              threadId: "thread-1",
+              objective: message.params.objective,
+              status: "active",
+              tokenBudget: null,
+              tokensUsed: 0,
+              timeUsedSeconds: 0,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          },
+        })
+      }
+    })
+
+    const manager = new CodexAppServerManager({
+      spawnProcess: () => process as never,
+    })
+
+    await manager.startSession({
+      chatId: "chat-1",
+      cwd: "/tmp/project",
+      model: "gpt-5.4",
+      sessionToken: null,
+    })
+
+    const turn = await manager.startTurn({
+      chatId: "chat-1",
+      model: "gpt-5.4",
+      content: "/goal wait five minutes then mark the goal complete",
+      planMode: false,
+      onToolRequest: async () => ({}),
+    })
+
+    await collectStream(turn.stream)
+    const goalSetRequest = process.messages.find((message: any) => message.method === "thread/goal/set") as
+      | { method: "thread/goal/set"; params: { threadId: string; objective: string; tokenBudget: null } }
+      | undefined
+    expect(goalSetRequest?.params).toEqual({
+      threadId: "thread-1",
+      objective: "wait five minutes then mark the goal complete",
+      tokenBudget: null,
+    })
+    expect(process.messages.some((message: any) => message.method === "turn/start")).toBe(false)
   })
 
   test("maps fast mode and reasoning into app-server params", async () => {

@@ -90,6 +90,52 @@ export interface TurnInterruptParams {
   turnId: string
 }
 
+export type ThreadGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete"
+
+export interface ThreadGoal {
+  threadId: string
+  objective: string
+  status: ThreadGoalStatus
+  tokenBudget: number | null
+  tokensUsed: number
+  timeUsedSeconds: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ThreadGoalSetParams {
+  threadId: string
+  objective?: string | null
+  status?: ThreadGoalStatus | null
+  tokenBudget?: number | null
+}
+
+export interface ThreadGoalSetResponse {
+  goal: ThreadGoal
+}
+
+export interface ThreadGoalGetParams {
+  threadId: string
+}
+
+export interface ThreadGoalGetResponse {
+  goal: ThreadGoal | null
+}
+
+export interface ThreadGoalClearParams {
+  threadId: string
+}
+
+export interface ThreadGoalClearResponse {
+  cleared: boolean
+}
+
 export interface ThreadSummary {
   id: string
 }
@@ -117,6 +163,16 @@ export interface TurnStartResponse {
 
 export interface ThreadStartedNotification {
   thread: ThreadSummary
+}
+
+export interface ThreadGoalUpdatedNotification {
+  threadId: string
+  turnId: string | null
+  goal: ThreadGoal
+}
+
+export interface ThreadGoalClearedNotification {
+  threadId: string
 }
 
 export interface TurnStartedNotification {
@@ -444,6 +500,8 @@ export interface ErrorNotification {
 
 export type ServerNotification =
   | { method: "thread/started"; params: ThreadStartedNotification }
+  | { method: "thread/goal/updated"; params: ThreadGoalUpdatedNotification }
+  | { method: "thread/goal/cleared"; params: ThreadGoalClearedNotification }
   | { method: "thread/tokenUsage/updated"; params: ThreadTokenUsageUpdatedNotification }
   | { method: "turn/started"; params: TurnStartedNotification }
   | { method: "turn/completed"; params: TurnCompletedNotification }
@@ -475,6 +533,8 @@ export function isServerNotification(value: unknown): value is ServerNotificatio
   const candidate = value as Record<string, unknown>
   if (typeof candidate.method !== "string" || "id" in candidate) return false
   return candidate.method === "thread/started"
+    || candidate.method === "thread/goal/updated"
+    || candidate.method === "thread/goal/cleared"
     || candidate.method === "thread/tokenUsage/updated"
     || candidate.method === "turn/started"
     || candidate.method === "turn/completed"

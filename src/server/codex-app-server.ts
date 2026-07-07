@@ -31,6 +31,12 @@ import {
   type PlanDeltaNotification,
   type ServerNotification,
   type ServerRequest,
+  type ThreadGoalClearParams,
+  type ThreadGoalClearResponse,
+  type ThreadGoalGetParams,
+  type ThreadGoalGetResponse,
+  type ThreadGoalSetParams,
+  type ThreadGoalSetResponse,
   type ThreadItem,
   type ThreadResumeParams,
   type ThreadResumeResponse,
@@ -113,6 +119,11 @@ interface SessionContext {
   stderrLines: string[]
   closed: boolean
 }
+
+type GoalSlashCommand =
+  | { kind: "get" }
+  | { kind: "clear" }
+  | { kind: "set"; objective: string }
 
 export interface StartCodexSessionArgs {
   chatId: string
@@ -302,6 +313,21 @@ function renderPlanMarkdownFromSteps(steps: TurnPlanStep[]): string {
     const checkbox = step.status === "completed" ? "[x]" : "[ ]"
     return `- ${checkbox} ${step.step}`
   }).join("\n")
+}
+
+function parseGoalSlashCommand(content: string): GoalSlashCommand | null {
+  const trimmed = content.trim()
+  const match = /^\/goal(?:\s+([\s\S]*))?$/i.exec(trimmed)
+  if (!match) return null
+
+  const arg = (match[1] ?? "").trim()
+  if (!arg || arg.toLowerCase() === "status" || arg.toLowerCase() === "get") {
+    return { kind: "get" }
+  }
+  if (arg.toLowerCase() === "clear" || arg.toLowerCase() === "reset" || arg.toLowerCase() === "remove") {
+    return { kind: "clear" }
+  }
+  return { kind: "set", objective: arg }
 }
 
 function dynamicContentToText(contentItems: DynamicToolCallOutputContentItem[] | null | undefined): string {
@@ -837,6 +863,11 @@ export class CodexAppServerManager {
       throw new Error("Codex turn is already running")
     }
 
+    const goalCommand = parseGoalSlashCommand(args.content)
+    if (goalCommand) {
+      return await this.runGoalSlashCommand(context, args.model, goalCommand)
+    }
+
     const queue = new AsyncQueue<HarnessEvent>()
     if (context.sessionToken) {
       queue.push({ type: "session_token", sessionToken: context.sessionToken })
@@ -914,6 +945,68 @@ export class CodexAppServerManager {
           turnId: pendingTurn.turnId,
         } satisfies TurnInterruptParams)
       },
+      close: () => {},
+    }
+  }
+
+  private async runGoalSlashCommand(
+    context: SessionContext,
+    model: string,
+    command: GoalSlashCommand,
+  ): Promise<HarnessTurn> {
+    if (!context.sessionToken) {
+      throw new Error("Codex session not started")
+    }
+
+    const queue = new AsyncQueue<HarnessEvent>()
+    queue.push({ type: "session_token", sessionToken: context.sessionToken })
+    queue.push({ type: "transcript", entry: codexSystemInitEntry(model) })
+
+    let message: string
+    if (command.kind === "clear") {
+      const response = await this.sendRequest<ThreadGoalClearResponse>(context, "thread/goal/clear", {
+        threadId: context.sessionToken,
+      } satisfies ThreadGoalClearParams)
+      message = response.cleared ? "Goal cleared." : "No active goal to clear."
+    } else if (command.kind === "set") {
+      const response = await this.sendRequest<ThreadGoalSetResponse>(context, "thread/goal/set", {
+        threadId: context.sessionToken,
+        objective: command.objective,
+        tokenBudget: null,
+      } satisfies ThreadGoalSetParams)
+      message = `Goal set: ${response.goal.objective}`
+    } else {
+      const response = await this.sendRequest<ThreadGoalGetResponse>(context, "thread/goal/get", {
+        threadId: context.sessionToken,
+      } satisfies ThreadGoalGetParams)
+      message = response.goal
+        ? `Goal: ${response.goal.objective}\nStatus: ${response.goal.status}`
+        : "No active goal."
+    }
+
+    queue.push({
+      type: "transcript",
+      entry: timestamped({
+        kind: "assistant_text",
+        text: message,
+      }),
+    })
+    queue.push({
+      type: "transcript",
+      entry: timestamped({
+        kind: "result",
+        subtype: "success",
+        isError: false,
+        durationMs: 0,
+        result: "",
+      }),
+    })
+    queue.finish()
+
+    return {
+      provider: "codex",
+      stream: queue,
+      interrupt: async () => {},
       close: () => {},
     }
   }
