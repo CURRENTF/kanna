@@ -13,6 +13,7 @@ import type {
 import type { HarnessEvent, HarnessToolRequest, HarnessTurn } from "./harness-types"
 import {
   type CollabAgentToolCallItem,
+  type CommandExecutionOutputDeltaNotification,
   type ContextCompactedNotification,
   type CodexRequestId,
   type CommandExecutionApprovalDecision,
@@ -29,6 +30,7 @@ import {
   type JsonRpcResponse,
   type McpToolCallItem,
   type PlanDeltaNotification,
+  type RawResponseItemCompletedNotification,
   type ServerNotification,
   type ServerRequest,
   type ThreadGoalClearParams,
@@ -90,6 +92,7 @@ interface PendingTurn {
   latestPlanSteps: TurnPlanStep[]
   latestPlanText: string | null
   planTextByItemId: Map<string, string>
+  commandOutputByItemId: Map<string, string>
   todoSequence: number
   pendingWebSearchResultToolId: string | null
   resolved: boolean
@@ -342,6 +345,15 @@ function dynamicToolPayload(value: Record<string, unknown> | unknown[] | string 
   const record = asRecord(value)
   if (record) return record
   return { value }
+}
+
+function commandOutputFromRawFunctionCallOutput(output: string): string | null {
+  const marker = "\nOutput:\n"
+  const markerIndex = output.lastIndexOf(marker)
+  if (markerIndex === -1) {
+    return null
+  }
+  return output.slice(markerIndex + marker.length)
 }
 
 function webSearchQuery(item: Extract<ThreadItem, { type: "webSearch" }>): string {
@@ -666,7 +678,21 @@ function itemToToolCalls(item: ThreadItem): TranscriptEntry[] {
   }
 }
 
-function itemToToolResults(item: ThreadItem): TranscriptEntry[] {
+function commandExecutionOutputContent(
+  item: Extract<ThreadItem, { type: "commandExecution" }>,
+  streamedOutput: string | undefined,
+) {
+  const completedOutput = item.aggregatedOutput ?? undefined
+  if (streamedOutput === undefined) {
+    return completedOutput ?? item
+  }
+  if (completedOutput === undefined) {
+    return streamedOutput
+  }
+  return streamedOutput.length >= completedOutput.length ? streamedOutput : completedOutput
+}
+
+function itemToToolResults(item: ThreadItem, commandOutputByItemId?: Map<string, string>): TranscriptEntry[] {
   switch (item.type) {
     case "dynamicToolCall":
       return [timestamped({
@@ -686,7 +712,7 @@ function itemToToolResults(item: ThreadItem): TranscriptEntry[] {
       return [timestamped({
         kind: "tool_result",
         toolId: item.id,
-        content: item.aggregatedOutput ?? item,
+        content: commandExecutionOutputContent(item, commandOutputByItemId?.get(item.id)),
         isError: (typeof item.exitCode === "number" && item.exitCode !== 0) || item.status === "failed" || item.status === "declined",
       })]
     case "webSearch":
@@ -816,7 +842,7 @@ export class CodexAppServerManager {
       serviceTier: args.serviceTier,
       approvalPolicy: "never",
       sandbox: "danger-full-access",
-      experimentalRawEvents: false,
+      experimentalRawEvents: true,
       persistExtendedHistory: false,
     } satisfies ThreadStartParams
 
@@ -827,10 +853,11 @@ export class CodexAppServerManager {
         model: args.model,
         cwd: args.cwd,
         serviceTier: args.serviceTier,
-        approvalPolicy: "never",
-        sandbox: "danger-full-access",
-        persistExtendedHistory: false,
-      } satisfies ThreadForkParams)
+          approvalPolicy: "never",
+          sandbox: "danger-full-access",
+          experimentalRawEvents: true,
+          persistExtendedHistory: false,
+        } satisfies ThreadForkParams)
     } else if (args.sessionToken) {
       try {
         response = await this.sendRequest<ThreadResumeResponse>(context, "thread/resume", {
@@ -840,6 +867,7 @@ export class CodexAppServerManager {
           serviceTier: args.serviceTier,
           approvalPolicy: "never",
           sandbox: "danger-full-access",
+          experimentalRawEvents: true,
           persistExtendedHistory: false,
         } satisfies ThreadResumeParams)
       } catch (error) {
@@ -1084,6 +1112,7 @@ export class CodexAppServerManager {
       latestPlanSteps: [],
       latestPlanText: null,
       planTextByItemId: new Map(),
+      commandOutputByItemId: new Map(),
       todoSequence: 0,
       pendingWebSearchResultToolId: null,
       resolved: false,
@@ -1397,6 +1426,12 @@ export class CodexAppServerManager {
       case "item/completed":
         this.handleItemCompleted(pendingTurn, notification.params)
         return
+      case "item/commandExecution/outputDelta":
+        this.handleCommandExecutionOutputDelta(pendingTurn, notification.params)
+        return
+      case "rawResponseItem/completed":
+        this.handleRawResponseItemCompleted(pendingTurn, notification.params)
+        return
       case "item/plan/delta":
         this.handlePlanDelta(pendingTurn, notification.params)
         return
@@ -1492,7 +1527,7 @@ export class CodexAppServerManager {
       pendingTurn.queue.push({ type: "transcript", entry })
     }
 
-    const resultEntries = itemToToolResults(notification.item)
+    const resultEntries = itemToToolResults(notification.item, pendingTurn.commandOutputByItemId)
     for (const entry of resultEntries) {
       pendingTurn.queue.push({ type: "transcript", entry })
       if (notification.item.type === "webSearch" && entry.kind === "tool_result" && !entry.isError) {
@@ -1522,6 +1557,36 @@ export class CodexAppServerManager {
     const next = `${current}${notification.delta}`
     pendingTurn.planTextByItemId.set(notification.itemId, next)
     pendingTurn.latestPlanText = next
+  }
+
+  private handleCommandExecutionOutputDelta(
+    pendingTurn: PendingTurn,
+    notification: CommandExecutionOutputDeltaNotification,
+  ) {
+    const current = pendingTurn.commandOutputByItemId.get(notification.itemId) ?? ""
+    pendingTurn.commandOutputByItemId.set(notification.itemId, `${current}${notification.delta}`)
+  }
+
+  private handleRawResponseItemCompleted(
+    pendingTurn: PendingTurn,
+    notification: RawResponseItemCompletedNotification,
+  ) {
+    if (notification.item.type !== "function_call_output") {
+      return
+    }
+    if (typeof notification.item.call_id !== "string" || typeof notification.item.output !== "string") {
+      return
+    }
+
+    const output = commandOutputFromRawFunctionCallOutput(notification.item.output)
+    if (output === null) {
+      return
+    }
+
+    const current = pendingTurn.commandOutputByItemId.get(notification.item.call_id)
+    if (current === undefined || output.length >= current.length) {
+      pendingTurn.commandOutputByItemId.set(notification.item.call_id, output)
+    }
   }
 
   private handleContextCompacted(pendingTurn: PendingTurn, _notification: ContextCompactedNotification) {

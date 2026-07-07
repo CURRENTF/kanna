@@ -42,6 +42,7 @@ export interface ThreadResumeParams {
   serviceTier?: ServiceTier | null
   approvalPolicy?: "never" | "on-request" | "on-failure" | "untrusted" | null
   sandbox?: "read-only" | "workspace-write" | "danger-full-access" | null
+  experimentalRawEvents?: boolean
   persistExtendedHistory: boolean
 }
 
@@ -53,6 +54,7 @@ export interface ThreadForkParams {
   approvalPolicy?: "never" | "on-request" | "on-failure" | "untrusted" | null
   sandbox?: "read-only" | "workspace-write" | "danger-full-access" | null
   ephemeral?: boolean
+  experimentalRawEvents?: boolean
   persistExtendedHistory: boolean
 }
 
@@ -252,6 +254,23 @@ export interface CommandExecutionRequestApprovalParams {
   reason?: string | null
   command?: string | null
   cwd?: string | null
+}
+
+export interface CommandExecutionOutputDeltaNotification {
+  threadId: string
+  turnId: string
+  itemId: string
+  delta: string
+}
+
+export interface RawResponseItemCompletedNotification {
+  threadId: string
+  turnId: string
+  item: {
+    type: string
+    call_id?: string
+    output?: string
+  } & Record<string, unknown>
 }
 
 export interface FileChangeRequestApprovalParams {
@@ -492,7 +511,9 @@ export type ServerNotification =
   | { method: "turn/plan/updated"; params: TurnPlanUpdatedNotification }
   | { method: "item/started"; params: ItemStartedNotification }
   | { method: "item/completed"; params: ItemCompletedNotification }
+  | { method: "item/commandExecution/outputDelta"; params: CommandExecutionOutputDeltaNotification }
   | { method: "item/plan/delta"; params: PlanDeltaNotification }
+  | { method: "rawResponseItem/completed"; params: RawResponseItemCompletedNotification }
   | { method: "thread/compacted"; params: ContextCompactedNotification }
   | { method: "error"; params: ErrorNotification }
 
@@ -525,7 +546,9 @@ export function isServerNotification(value: unknown): value is ServerNotificatio
     || candidate.method === "turn/plan/updated"
     || candidate.method === "item/started"
     || candidate.method === "item/completed"
+    || candidate.method === "item/commandExecution/outputDelta"
     || candidate.method === "item/plan/delta"
+    || candidate.method === "rawResponseItem/completed"
     || candidate.method === "thread/compacted"
     || candidate.method === "error"
 }

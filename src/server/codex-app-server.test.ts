@@ -178,6 +178,29 @@ describe("CodexAppServerManager", () => {
         threadId: "thread-1",
       },
     })).toBe(true)
+
+    expect(isServerNotification({
+      method: "item/commandExecution/outputDelta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "call-1",
+        delta: "1\n",
+      },
+    })).toBe(true)
+
+    expect(isServerNotification({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "function_call_output",
+          call_id: "call-1",
+          output: "Output:\n1\n",
+        },
+      },
+    })).toBe(true)
   })
 
   test("routes /goal clear to the app-server goal clear request instead of a model turn", async () => {
@@ -625,6 +648,199 @@ describe("CodexAppServerManager", () => {
 
     expect(events[0]).toEqual({ type: "session_token", sessionToken: "thread-1" })
     expect(transcriptKinds).toEqual(["system_init", "tool_call", "tool_result", "assistant_text", "result"])
+  })
+
+  test("uses command output deltas when completed command output is incomplete", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { thread: { id: "thread-1" }, model: "gpt-5.4", reasoningEffort: "high" },
+        })
+      } else if (message.method === "turn/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { turn: { id: "turn-1", status: "inProgress", error: null } },
+        })
+        child.writeServerMessage({
+          method: "item/started",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "commandExecution",
+              id: "call-1",
+              command: "for i in 1 2 3 4 5 6 7; do echo $i; done",
+              status: "inProgress",
+            },
+          },
+        })
+        for (const delta of ["1\n", "2\n", "3\n", "4\n", "5\n", "6\n", "7\n"]) {
+          child.writeServerMessage({
+            method: "item/commandExecution/outputDelta",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              itemId: "call-1",
+              delta,
+            },
+          })
+        }
+        child.writeServerMessage({
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "commandExecution",
+              id: "call-1",
+              command: "for i in 1 2 3 4 5 6 7; do echo $i; done",
+              status: "completed",
+              aggregatedOutput: "7\n",
+              exitCode: 0,
+            },
+          },
+        })
+        child.writeServerMessage({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed", error: null },
+          },
+        })
+      }
+    })
+
+    const manager = new CodexAppServerManager({
+      spawnProcess: () => process as never,
+    })
+
+    await manager.startSession({
+      chatId: "chat-1",
+      cwd: "/tmp/project",
+      model: "gpt-5.4",
+      sessionToken: null,
+    })
+
+    const turn = await manager.startTurn({
+      chatId: "chat-1",
+      model: "gpt-5.4",
+      content: "count",
+      planMode: false,
+      onToolRequest: async () => ({}),
+    })
+
+    const events = await collectStream(turn.stream)
+    const toolResult = events.find((event) => event.type === "transcript" && event.entry.kind === "tool_result")
+    expect(toolResult?.entry.kind).toBe("tool_result")
+    expect(toolResult?.entry.content).toBe("1\n2\n3\n4\n5\n6\n7\n")
+  })
+
+  test("recovers command output from raw function call output when app-server command output is truncated", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { thread: { id: "thread-1" }, model: "gpt-5.4", reasoningEffort: "high" },
+        })
+      } else if (message.method === "turn/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { turn: { id: "turn-1", status: "inProgress", error: null } },
+        })
+        child.writeServerMessage({
+          method: "item/started",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "commandExecution",
+              id: "call-1",
+              command: "for i in 1 2 3 4 5 6 7; do echo $i; done",
+              status: "inProgress",
+            },
+          },
+        })
+        for (const delta of ["2\n", "3\n", "4\n", "5\n", "6\n", "7\n"]) {
+          child.writeServerMessage({
+            method: "item/commandExecution/outputDelta",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              itemId: "call-1",
+              delta,
+            },
+          })
+        }
+        child.writeServerMessage({
+          method: "rawResponseItem/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "function_call_output",
+              call_id: "call-1",
+              output: "Chunk ID: abc123\nWall time: 6.8 seconds\nProcess exited with code 0\nOutput:\n1\n2\n3\n4\n5\n6\n7\n",
+            },
+          },
+        })
+        child.writeServerMessage({
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "commandExecution",
+              id: "call-1",
+              command: "for i in 1 2 3 4 5 6 7; do echo $i; done",
+              status: "completed",
+              aggregatedOutput: "2\n3\n4\n5\n6\n7\n",
+              exitCode: 0,
+            },
+          },
+        })
+        child.writeServerMessage({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed", error: null },
+          },
+        })
+      }
+    })
+
+    const manager = new CodexAppServerManager({
+      spawnProcess: () => process as never,
+    })
+
+    await manager.startSession({
+      chatId: "chat-1",
+      cwd: "/tmp/project",
+      model: "gpt-5.4",
+      sessionToken: null,
+    })
+
+    const threadStartRequest = process.messages.find((message: any) => message.method === "thread/start") as
+      | { method: "thread/start"; params: { experimentalRawEvents: boolean } }
+      | undefined
+    expect(threadStartRequest?.params.experimentalRawEvents).toBe(true)
+
+    const turn = await manager.startTurn({
+      chatId: "chat-1",
+      model: "gpt-5.4",
+      content: "count",
+      planMode: false,
+      onToolRequest: async () => ({}),
+    })
+
+    const events = await collectStream(turn.stream)
+    const toolResult = events.find((event) => event.type === "transcript" && event.entry.kind === "tool_result")
+    expect(toolResult?.entry.kind).toBe("tool_result")
+    expect(toolResult?.entry.content).toBe("1\n2\n3\n4\n5\n6\n7\n")
   })
 
   test("emits only a compact boundary when Codex reports thread compaction", async () => {
