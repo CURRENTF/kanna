@@ -308,11 +308,12 @@ describe("CodexAppServerManager", () => {
 
     const events = await collectStream(turn.stream)
     const goalSetRequest = process.messages.find((message: any) => message.method === "thread/goal/set") as
-      | { method: "thread/goal/set"; params: { threadId: string; objective: string; tokenBudget: null } }
+      | { method: "thread/goal/set"; params: { threadId: string; objective: string; status: string; tokenBudget: null } }
       | undefined
     expect(goalSetRequest?.params).toEqual({
       threadId: "thread-1",
       objective: "wait five minutes then mark the goal complete",
+      status: "active",
       tokenBudget: null,
     })
     expect(process.messages.some((message: any) => message.method === "turn/start")).toBe(false)

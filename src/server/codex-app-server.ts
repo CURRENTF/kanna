@@ -983,6 +983,7 @@ export class CodexAppServerManager {
       try {
         const goal = await this.setGoal(context.chatId, {
           objective: command.objective,
+          status: "active",
           tokenBudget: null,
         })
         queue.push({
