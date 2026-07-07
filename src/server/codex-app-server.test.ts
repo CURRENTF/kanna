@@ -235,7 +235,7 @@ describe("CodexAppServerManager", () => {
     )).toBe(true)
   })
 
-  test("routes /goal text to the app-server goal set request", async () => {
+  test("streams follow-up turn output after /goal text sets the official goal", async () => {
     const process = new FakeCodexProcess((message, child) => {
       if (message.method === "initialize") {
         child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
@@ -260,6 +260,30 @@ describe("CodexAppServerManager", () => {
             },
           },
         })
+        child.writeServerMessage({
+          method: "turn/started",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "goal-turn-1", status: "inProgress", error: null },
+          },
+        })
+        for (const text of ["1", "2", "3", "4", "5", "6", "7"]) {
+          child.writeServerMessage({
+            method: "item/completed",
+            params: {
+              threadId: "thread-1",
+              turnId: "goal-turn-1",
+              item: { type: "agentMessage", id: `msg-${text}`, text },
+            },
+          })
+        }
+        child.writeServerMessage({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "goal-turn-1", status: "completed", error: null },
+          },
+        })
       }
     })
 
@@ -282,7 +306,7 @@ describe("CodexAppServerManager", () => {
       onToolRequest: async () => ({}),
     })
 
-    await collectStream(turn.stream)
+    const events = await collectStream(turn.stream)
     const goalSetRequest = process.messages.find((message: any) => message.method === "thread/goal/set") as
       | { method: "thread/goal/set"; params: { threadId: string; objective: string; tokenBudget: null } }
       | undefined
@@ -292,6 +316,20 @@ describe("CodexAppServerManager", () => {
       tokenBudget: null,
     })
     expect(process.messages.some((message: any) => message.method === "turn/start")).toBe(false)
+    const assistantTexts = events
+      .filter((event) => event.type === "transcript" && event.entry.kind === "assistant_text")
+      .map((event) => event.entry.text)
+    expect(assistantTexts).toEqual(expect.arrayContaining([
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+    ]))
+    const resultEvent = events.find((event) => event.type === "transcript" && event.entry.kind === "result")
+    expect(resultEvent?.entry.subtype).toBe("success")
   })
 
   test("maps fast mode and reasoning into app-server params", async () => {

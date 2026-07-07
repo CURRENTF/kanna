@@ -865,32 +865,10 @@ export class CodexAppServerManager {
 
     const goalCommand = parseGoalSlashCommand(args.content)
     if (goalCommand) {
-      return await this.runGoalSlashCommand(context, args.model, goalCommand)
+      return await this.runGoalSlashCommand(context, args, goalCommand)
     }
 
-    const queue = new AsyncQueue<HarnessEvent>()
-    if (context.sessionToken) {
-      queue.push({ type: "session_token", sessionToken: context.sessionToken })
-    }
-    queue.push({ type: "transcript", entry: codexSystemInitEntry(args.model) })
-
-    const pendingTurn: PendingTurn = {
-      turnId: null,
-      model: args.model,
-      planMode: args.planMode,
-      queue,
-      startedToolIds: new Set(),
-      handledDynamicToolIds: new Set(),
-      latestPlanExplanation: null,
-      latestPlanSteps: [],
-      latestPlanText: null,
-      planTextByItemId: new Map(),
-      todoSequence: 0,
-      pendingWebSearchResultToolId: null,
-      resolved: false,
-      onToolRequest: args.onToolRequest,
-      onApprovalRequest: args.onApprovalRequest,
-    }
+    const { queue, pendingTurn } = this.createPendingTurn(context, args)
     context.pendingTurn = pendingTurn
 
     try {
@@ -988,27 +966,68 @@ export class CodexAppServerManager {
 
   private async runGoalSlashCommand(
     context: SessionContext,
-    model: string,
+    args: StartCodexTurnArgs,
     command: GoalSlashCommand,
   ): Promise<HarnessTurn> {
     if (!context.sessionToken) {
       throw new Error("Codex session not started")
     }
 
+    if (command.kind === "set") {
+      const { queue, pendingTurn } = this.createPendingTurn(context, {
+        ...args,
+        planMode: false,
+      })
+      context.pendingTurn = pendingTurn
+
+      try {
+        const goal = await this.setGoal(context.chatId, {
+          objective: command.objective,
+          tokenBudget: null,
+        })
+        queue.push({
+          type: "transcript",
+          entry: timestamped({
+            kind: "assistant_text",
+            text: `Goal set: ${goal.objective}`,
+          }),
+        })
+      } catch (error) {
+        context.pendingTurn = null
+        queue.finish()
+        throw error
+      }
+
+      return {
+        provider: "codex",
+        stream: queue,
+        interrupt: async () => {
+          const activeTurn = context.pendingTurn
+          if (!activeTurn) return
+
+          context.pendingTurn = null
+          activeTurn.resolved = true
+          activeTurn.queue.finish()
+
+          if (!activeTurn.turnId || !context.sessionToken) return
+
+          await this.sendRequest(context, "turn/interrupt", {
+            threadId: context.sessionToken,
+            turnId: activeTurn.turnId,
+          } satisfies TurnInterruptParams)
+        },
+        close: () => {},
+      }
+    }
+
     const queue = new AsyncQueue<HarnessEvent>()
     queue.push({ type: "session_token", sessionToken: context.sessionToken })
-    queue.push({ type: "transcript", entry: codexSystemInitEntry(model) })
+    queue.push({ type: "transcript", entry: codexSystemInitEntry(args.model) })
 
     let message: string
     if (command.kind === "clear") {
       const cleared = await this.clearGoal(context.chatId)
       message = cleared ? "Goal cleared." : "No active goal to clear."
-    } else if (command.kind === "set") {
-      const goal = await this.setGoal(context.chatId, {
-        objective: command.objective,
-        tokenBudget: null,
-      })
-      message = `Goal set: ${goal.objective}`
     } else {
       const goal = await this.getGoal(context.chatId)
       message = goal
@@ -1041,6 +1060,37 @@ export class CodexAppServerManager {
       interrupt: async () => {},
       close: () => {},
     }
+  }
+
+  private createPendingTurn(
+    context: SessionContext,
+    args: Pick<StartCodexTurnArgs, "model" | "planMode" | "onToolRequest" | "onApprovalRequest">,
+  ) {
+    const queue = new AsyncQueue<HarnessEvent>()
+    if (context.sessionToken) {
+      queue.push({ type: "session_token", sessionToken: context.sessionToken })
+    }
+    queue.push({ type: "transcript", entry: codexSystemInitEntry(args.model) })
+
+    const pendingTurn: PendingTurn = {
+      turnId: null,
+      model: args.model,
+      planMode: args.planMode,
+      queue,
+      startedToolIds: new Set(),
+      handledDynamicToolIds: new Set(),
+      latestPlanExplanation: null,
+      latestPlanSteps: [],
+      latestPlanText: null,
+      planTextByItemId: new Map(),
+      todoSequence: 0,
+      pendingWebSearchResultToolId: null,
+      resolved: false,
+      onToolRequest: args.onToolRequest,
+      onApprovalRequest: args.onApprovalRequest,
+    }
+
+    return { queue, pendingTurn }
   }
 
   async generateStructured(args: GenerateStructuredArgs): Promise<string | null> {
@@ -1336,6 +1386,9 @@ export class CodexAppServerManager {
         return
       case "turn/plan/updated":
         this.handlePlanUpdated(pendingTurn, notification.params)
+        return
+      case "turn/started":
+        pendingTurn.turnId = notification.params.turn.id
         return
       case "item/started":
         this.handleItemStarted(pendingTurn, notification.params)
