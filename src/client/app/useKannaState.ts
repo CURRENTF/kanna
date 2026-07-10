@@ -772,6 +772,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
   const [projectDiffSnapshots, setProjectDiffSnapshots] = useState<Record<string, ChatDiffSnapshot | null>>({})
   const [keybindings, setKeybindings] = useState<KeybindingsSnapshot | null>(null)
   const [appSettings, setAppSettings] = useState<AppSettingsSnapshot | null>(null)
+  const [providerCatalog, setProviderCatalog] = useState<ProviderCatalogEntry[]>(PROVIDERS)
   const [llmProvider, setLlmProvider] = useState<LlmProviderSnapshot | null>(null)
   const [codexGoal, setCodexGoal] = useState<CodexGoal | null>(null)
   const [isGoalLoading, setIsGoalLoading] = useState(false)
@@ -865,6 +866,21 @@ export function useKannaState(activeChatId: string | null): KannaState {
     void socket.command<UpdateSnapshot>({ type: "update.check", force: true }).catch((error) => {
       setCommandError(error instanceof Error ? error.message : String(error))
     })
+  }, [connectionStatus, socket])
+
+  useEffect(() => {
+    if (connectionStatus !== "connected") return
+    let cancelled = false
+    void socket.command<ProviderCatalogEntry[]>({ type: "settings.readProviderCatalog" })
+      .then((catalog) => {
+        if (!cancelled && catalog.length > 0) setProviderCatalog(catalog)
+      })
+      .catch(() => {
+        // Keep the bundled catalog when talking to an older server.
+      })
+    return () => {
+      cancelled = true
+    }
   }, [connectionStatus, socket])
 
   useEffect(() => {
@@ -1287,7 +1303,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
     ? "starting"
     : null
   const effectiveRuntimeStatus = optimisticRuntimeStatus ?? runtime?.status ?? null
-  const availableProviders = activeChatSnapshot?.availableProviders ?? PROVIDERS
+  const availableProviders = activeChatSnapshot?.availableProviders ?? providerCatalog
   const isProcessing = isProcessingStatus(effectiveRuntimeStatus ?? undefined)
   const canCancel = canCancelStatus(effectiveRuntimeStatus ?? undefined)
   const isDraining = runtime?.isDraining ?? false

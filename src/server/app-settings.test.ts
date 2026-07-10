@@ -135,6 +135,7 @@ describe("AppSettingsManager", () => {
       editor: { preset: "vscode" },
       providerDefaults: {
         codex: {
+          model: "gpt-5.6-sol",
           modelOptions: { reasoningEffort: "high", fastMode: true },
         },
       },
@@ -155,6 +156,7 @@ describe("AppSettingsManager", () => {
     expect(snapshot.editor.preset).toBe("vscode")
     expect(snapshot.editor.commandTemplate).toBe("cursor {path}")
     expect(snapshot.providerDefaults.codex.modelOptions.fastMode).toBe(true)
+    expect(snapshot.providerDefaults.codex.model).toBe("gpt-5.6-sol")
     expect(nextPayload.analyticsUserId).toBe(initialPayload.analyticsUserId)
     expect(nextPayload.theme).toBe("dark")
     expect(nextPayload.chatSoundId).toBe("glass")

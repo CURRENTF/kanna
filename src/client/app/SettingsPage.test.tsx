@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { renderToStaticMarkup } from "react-dom/server"
+import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom"
 import { RefreshCw } from "lucide-react"
 import {
   ChangelogSection,
@@ -13,9 +14,13 @@ import {
   setCachedChangelog,
   shouldPreviewChatSoundChange,
   SkillsSection,
+  SettingsPage,
 } from "./SettingsPage"
 import { SettingsHeaderButton } from "../components/ui/settings-header-button"
-import type { UpdateSnapshot } from "../../shared/types"
+import { PROVIDERS, type UpdateSnapshot } from "../../shared/types"
+import { useChatPreferencesStore } from "../stores/chatPreferencesStore"
+import type { KannaState } from "./useKannaState"
+import { ThemeProvider } from "../hooks/useTheme"
 
 const SAMPLE_RELEASES = [
   {
@@ -205,6 +210,78 @@ describe("SettingsHeaderButton", () => {
 
     expect(html).toContain("Update")
     expect(html).toContain("bg-primary")
+  })
+})
+
+describe("provider defaults", () => {
+  test("renders Codex defaults from the live provider catalog", () => {
+    const previousPreferences = useChatPreferencesStore.getState()
+    const initialPreferences = useChatPreferencesStore.getInitialState()
+    const previousInitialCodexModel = initialPreferences.providerDefaults.codex.model
+    const liveProviders = PROVIDERS.map((provider) => provider.id === "codex"
+      ? {
+          ...provider,
+          defaultModel: "gpt-5.6-sol",
+          models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", supportsEffort: true }, ...provider.models],
+        }
+      : provider)
+
+    useChatPreferencesStore.setState({
+      defaultProvider: "codex",
+      providerDefaults: {
+        ...previousPreferences.providerDefaults,
+        codex: {
+          ...previousPreferences.providerDefaults.codex,
+          model: "gpt-5.6-sol",
+        },
+      },
+    })
+    initialPreferences.providerDefaults.codex.model = "gpt-5.6-sol"
+
+    try {
+      const state = {
+        availableProviders: liveProviders,
+        connectionStatus: "connected",
+        localProjectsReady: true,
+        localProjects: {
+          machine: { id: "local", displayName: "Test machine", platform: "linux" },
+          projects: [],
+        },
+        keybindings: null,
+        appSettings: null,
+        llmProvider: null,
+        updateSnapshot: null,
+        openSidebar: () => {},
+        handleWriteAppSettings: async () => {},
+        handleReadLlmProvider: async () => {},
+        handleWriteLlmProvider: async () => {},
+        handleValidateLlmProvider: async () => ({ ok: true, error: null }),
+        handleSignOut: async () => {},
+      } as unknown as KannaState
+
+      const html = renderToStaticMarkup(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={["/settings/providers"]}>
+            <Routes>
+              <Route element={<Outlet context={state} />}>
+                <Route path="/settings/:sectionId" element={<SettingsPage />} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </ThemeProvider>
+      )
+
+      expect(html).toContain("GPT-5.6-Sol")
+      expect(html).not.toContain(">gpt-5.6-sol<")
+    } finally {
+      initialPreferences.providerDefaults.codex.model = previousInitialCodexModel
+      useChatPreferencesStore.setState({
+        defaultProvider: previousPreferences.defaultProvider,
+        providerDefaults: previousPreferences.providerDefaults,
+        chatStates: previousPreferences.chatStates,
+        legacyComposerState: previousPreferences.legacyComposerState,
+      })
+    }
   })
 })
 

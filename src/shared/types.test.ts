@@ -23,6 +23,7 @@ describe("shared model normalization", () => {
   test("normalizes legacy Codex aliases and defaults to the latest catalog model", () => {
     expect(normalizeCodexModelId()).toBe("gpt-5.5")
     expect(normalizeCodexModelId("gpt-5-codex")).toBe("gpt-5.3-codex")
+    expect(normalizeCodexModelId("gpt-5.6-sol")).toBe("gpt-5.6-sol")
   })
 
   test("uses declarative metadata for Claude max-effort support", () => {

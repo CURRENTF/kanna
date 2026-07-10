@@ -151,40 +151,6 @@ export function normalizeCodexPreference(value?: {
   }
 }
 
-function forcePersistedCodexPreference<T extends {
-  model?: string
-  effort?: string
-  modelOptions?: Partial<CodexModelOptions>
-  planMode?: boolean
-}>(value?: T): T | undefined {
-  if (!value) return value
-  return {
-    ...value,
-    model: "gpt-5.5",
-  }
-}
-
-function forcePersistedCodexComposerState<T extends PersistedComposerState | ComposerState>(value?: T): T | undefined {
-  if (!value || value.provider !== "codex") return value
-  return {
-    ...value,
-    model: "gpt-5.5",
-  }
-}
-
-function forcePersistedCodexChatStates(
-  value?: Record<string, PersistedComposerState | ComposerState>
-): Record<string, PersistedComposerState | ComposerState> | undefined {
-  if (!value) return value
-
-  return Object.fromEntries(
-    Object.entries(value).map(([chatId, composerState]) => [
-      chatId,
-      forcePersistedCodexComposerState(composerState) ?? composerState,
-    ])
-  )
-}
-
 export function createDefaultProviderDefaults(): ChatProviderPreferences {
   return {
     claude: {
@@ -440,10 +406,9 @@ export function migrateChatPreferencesState(
 ): Pick<ChatPreferencesState, "defaultProvider" | "providerDefaults" | "chatStates" | "legacyComposerState"> {
   const providerDefaults = normalizeProviderDefaults({
     ...persistedState?.providerDefaults,
-    codex: forcePersistedCodexPreference(persistedState?.providerDefaults?.codex),
   })
   const legacyComposerState = normalizePersistedComposerState(
-    forcePersistedCodexComposerState(persistedState?.legacyComposerState ?? persistedState?.composerState),
+    persistedState?.legacyComposerState ?? persistedState?.composerState,
     providerDefaults
   )
   const legacyLiveComposerState = persistedState?.liveProvider
@@ -453,7 +418,6 @@ export function migrateChatPreferencesState(
       persistedState.liveProvider,
       {
         ...persistedState?.livePreferences,
-        codex: forcePersistedCodexPreference(persistedState?.livePreferences?.codex),
       }
     )
     : null
@@ -461,7 +425,7 @@ export function migrateChatPreferencesState(
   return {
     defaultProvider: normalizeDefaultProvider(persistedState?.defaultProvider),
     providerDefaults,
-    chatStates: normalizeChatStates(forcePersistedCodexChatStates(persistedState?.chatStates), providerDefaults),
+    chatStates: normalizeChatStates(persistedState?.chatStates, providerDefaults),
     legacyComposerState: legacyComposerState ?? legacyLiveComposerState,
   }
 }

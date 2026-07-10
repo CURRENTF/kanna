@@ -22,6 +22,7 @@ import { TerminalManager } from "./terminal-manager"
 import type { UpdateManager } from "./update-manager"
 import { WorktreeManager } from "./worktree-manager"
 import { deriveChatSnapshot, deriveLocalProjectsSnapshot, deriveSidebarData } from "./read-models"
+import { SERVER_PROVIDERS } from "./provider-catalog"
 import type {
   AppSettingsPatch,
   AppSettingsSnapshot,
@@ -1118,6 +1119,10 @@ export function createWsRouter({
         }
         case "settings.readAppSettings": {
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: resolvedAppSettings.getSnapshot() })
+          return
+        }
+        case "settings.readProviderCatalog": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: SERVER_PROVIDERS })
           return
         }
         case "settings.writeAppSettings": {

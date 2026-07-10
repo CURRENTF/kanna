@@ -1826,7 +1826,7 @@ export function SettingsPage() {
                     >
                       <div className="max-w-[420px]">
                         <ChatPreferenceControls
-                          availableProviders={PROVIDERS}
+                          availableProviders={state.availableProviders}
                           selectedProvider="claude"
                           showProviderPicker={false}
                           providerLocked
@@ -1857,7 +1857,7 @@ export function SettingsPage() {
                     >
                       <div className="max-w-[420px]">
                         <ChatPreferenceControls
-                          availableProviders={PROVIDERS}
+                          availableProviders={state.availableProviders}
                           selectedProvider="codex"
                           showProviderPicker={false}
                           providerLocked

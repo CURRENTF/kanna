@@ -63,7 +63,7 @@ describe("migrateChatPreferencesState", () => {
           planMode: true,
         },
         codex: {
-          model: "gpt-5.5",
+          model: "gpt-5.3-codex",
           modelOptions: {
             reasoningEffort: "minimal",
             fastMode: true,
@@ -112,7 +112,7 @@ describe("migrateChatPreferencesState", () => {
     })
   })
 
-  test("rewrites persisted Codex defaults to gpt-5.5 during migration", () => {
+  test("normalizes legacy Codex aliases without discarding dynamic models", () => {
     const migrated = migrateChatPreferencesState({
       defaultProvider: "last_used",
       providerDefaults: {
@@ -125,7 +125,7 @@ describe("migrateChatPreferencesState", () => {
     })
 
     expect(migrated.providerDefaults.codex).toEqual({
-      model: "gpt-5.5",
+      model: "gpt-5.3-codex",
       modelOptions: {
         reasoningEffort: "low",
         fastMode: true,
@@ -136,7 +136,7 @@ describe("migrateChatPreferencesState", () => {
     })
   })
 
-  test("rewrites persisted Codex composer state to gpt-5.5 during migration", () => {
+  test("preserves persisted Codex models during migration", () => {
     const migrated = migrateChatPreferencesState({
       defaultProvider: "codex",
       providerDefaults: {
@@ -163,7 +163,7 @@ describe("migrateChatPreferencesState", () => {
     })
 
     expect(migrated.providerDefaults.codex).toEqual({
-      model: "gpt-5.5",
+      model: "gpt-5.3-codex-spark",
       modelOptions: {
         reasoningEffort: "low",
         fastMode: true,
@@ -174,7 +174,7 @@ describe("migrateChatPreferencesState", () => {
     })
     expect(migrated.chatStates.chatA).toEqual({
       provider: "codex",
-      model: "gpt-5.5",
+      model: "gpt-5.4",
       modelOptions: {
         reasoningEffort: "medium",
         fastMode: false,
@@ -185,7 +185,7 @@ describe("migrateChatPreferencesState", () => {
     })
     expect(migrated.legacyComposerState).toEqual({
       provider: "codex",
-      model: "gpt-5.5",
+      model: "gpt-5.3-codex",
       modelOptions: {
         reasoningEffort: "xhigh",
         fastMode: true,
@@ -209,6 +209,12 @@ describe("chat preference store", () => {
       },
       planMode: false,
     })
+  })
+
+  test("accepts a dynamic Codex model as the saved default", () => {
+    useChatPreferencesStore.getState().setProviderDefaultModel("codex", "gpt-5.6-sol")
+
+    expect(useChatPreferencesStore.getState().providerDefaults.codex.model).toBe("gpt-5.6-sol")
   })
 
   test("editing provider defaults does not change existing chat state", () => {

@@ -14,6 +14,7 @@ import {
   listInstalledSkills,
   parseInstalledSkillsLock,
 } from "./ws-router"
+import { applyCodexAppServerModels, resetServerProvidersForTests } from "./provider-catalog"
 
 function withSidebarGroupDefaults(group: {
   groupKey: string
@@ -433,6 +434,62 @@ describe("ws-router", () => {
       },
     ])
     expect(writes).toEqual([{ analyticsEnabled: false }])
+  })
+
+  test("returns the live provider catalog for settings", async () => {
+    applyCodexAppServerModels([{
+      id: "gpt-5.6-sol",
+      model: "gpt-5.6-sol",
+      displayName: "GPT-5.6-Sol",
+      isDefault: true,
+      supportedReasoningEfforts: ["high"],
+    }])
+
+    try {
+      const router = createWsRouter({
+        store: { state: createEmptyState() } as never,
+        agent: { getActiveStatuses: () => new Map(), getDrainingChatIds: () => new Set() } as never,
+        terminals: {
+          getSnapshot: () => null,
+          onEvent: () => () => {},
+        } as never,
+        keybindings: {
+          getSnapshot: () => DEFAULT_KEYBINDINGS_SNAPSHOT,
+          onChange: () => () => {},
+        } as never,
+        refreshDiscovery: async () => [],
+        getDiscoveredProjects: () => [],
+        machineDisplayName: "Local Machine",
+        updateManager: null,
+      })
+      const ws = new FakeWebSocket()
+      router.handleOpen(ws as never)
+
+      await router.handleMessage(
+        ws as never,
+        JSON.stringify({
+          v: 1,
+          type: "command",
+          id: "provider-catalog-read-1",
+          command: { type: "settings.readProviderCatalog" },
+        })
+      )
+
+      expect(ws.sent).toEqual([{
+        v: PROTOCOL_VERSION,
+        type: "ack",
+        id: "provider-catalog-read-1",
+        result: expect.arrayContaining([
+          expect.objectContaining({
+            id: "codex",
+            defaultModel: "gpt-5.6-sol",
+            models: [expect.objectContaining({ id: "gpt-5.6-sol", label: "GPT-5.6-Sol" })],
+          }),
+        ]),
+      }])
+    } finally {
+      resetServerProvidersForTests()
+    }
   })
 
   test("subscribes to app settings and writes patches through the router", async () => {

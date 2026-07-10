@@ -345,7 +345,9 @@ export function normalizeClaudeModelId(modelId?: string, fallbackModelId = "clau
 }
 
 export function normalizeCodexModelId(modelId?: string, fallbackModelId = "gpt-5.5"): string {
-  return normalizeProviderModelId("codex", modelId, fallbackModelId)
+  const trimmedModelId = modelId?.trim()
+  if (!trimmedModelId) return fallbackModelId
+  return getProviderModelMatch("codex", trimmedModelId)?.id ?? trimmedModelId
 }
 
 export function getProviderModelOption(provider: AgentProvider, modelId: string): ProviderModelOption | undefined {
