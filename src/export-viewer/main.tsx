@@ -169,9 +169,13 @@ function StandaloneTranscriptApp() {
             onStopDraining={noop}
             onSteerQueuedMessage={noopPromise}
             onRemoveQueuedMessage={noopPromise}
+            onUpdateQueuedMessage={noopPromise}
+            onReorderQueuedMessages={noopPromise}
             onOpenLocalLink={handleOpenLocalLink}
             onAskUserQuestionSubmit={handleAskUserQuestion}
             onExitPlanModeConfirm={handleExitPlanMode}
+            onOpenSubagent={noopPromise}
+            onStopSubagent={noopPromise}
             showScrollButton={!isAtEnd && messages.length > 0}
             onIsAtEndChange={setIsAtEnd}
             scrollToBottom={scrollToBottom}

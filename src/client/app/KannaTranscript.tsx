@@ -11,6 +11,8 @@ import { ExitPlanModeMessage } from "../components/messages/ExitPlanModeMessage"
 import { TodoWriteMessage } from "../components/messages/TodoWriteMessage"
 import { ToolCallMessage } from "../components/messages/ToolCallMessage"
 import { ResultMessage } from "../components/messages/ResultMessage"
+import { ReasoningSummaryMessage } from "../components/messages/ReasoningSummaryMessage"
+import { TurnDiffMessage } from "../components/messages/TurnDiffMessage"
 import { InterruptedMessage } from "../components/messages/InterruptedMessage"
 import { CompactBoundaryMessage, ContextClearedMessage } from "../components/messages/CompactBoundaryMessage"
 import { CompactSummaryMessage } from "../components/messages/CompactSummaryMessage"
@@ -238,6 +240,10 @@ function sameMessage(left: HydratedTranscriptMessage, right: HydratedTranscriptM
       return right.kind === "account_info" && JSON.stringify(left.accountInfo) === JSON.stringify(right.accountInfo)
     case "assistant_text":
       return right.kind === "assistant_text" && left.text === right.text
+    case "reasoning_summary":
+      return right.kind === "reasoning_summary" && left.text === right.text
+    case "turn_diff":
+      return right.kind === "turn_diff" && left.turnId === right.turnId && left.diff === right.diff
     case "tool":
       return right.kind === "tool"
         && left.toolKind === right.toolKind
@@ -267,6 +273,8 @@ function sameMessage(left: HydratedTranscriptMessage, right: HydratedTranscriptM
     case "unknown":
       return right.kind === "unknown" && left.json === right.json
   }
+
+  return false
 }
 
 function isResolvedTranscriptRowUnchanged(left: ResolvedTranscriptRow, right: ResolvedTranscriptRow) {
@@ -348,6 +356,8 @@ interface TranscriptSingleRowProps {
     answers: AskUserQuestionAnswerMap
   ) => void
   onExitPlanModeConfirm: (toolUseId: string, confirmed: boolean, clearContext?: boolean, message?: string) => void
+  onOpenSubagent?: (threadId: string) => void
+  onStopSubagent?: (threadId: string) => void
 }
 
 const TranscriptSingleRow = memo(function TranscriptSingleRow({
@@ -364,6 +374,8 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
   isFinalStatus,
   onAskUserQuestionSubmit,
   onExitPlanModeConfirm,
+  onOpenSubagent,
+  onStopSubagent,
 }: TranscriptSingleRowProps) {
   let rendered: React.ReactNode = null
 
@@ -382,6 +394,12 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
         break
       case "assistant_text":
         rendered = <TextMessage key={message.id} message={message} />
+        break
+      case "reasoning_summary":
+        rendered = <ReasoningSummaryMessage key={message.id} message={message} />
+        break
+      case "turn_diff":
+        rendered = <TurnDiffMessage key={message.id} message={message} />
         break
       case "tool":
         if (message.toolKind === "ask_user_question") {
@@ -410,7 +428,7 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
           rendered = isLatestTodoWrite ? <TodoWriteMessage key={message.id} message={message} /> : null
           break
         }
-        rendered = <ToolCallMessage key={message.id} message={message} isLoading={isLoading} localPath={localPath} />
+        rendered = <ToolCallMessage key={message.id} message={message} isLoading={isLoading} localPath={localPath} onOpenSubagent={onOpenSubagent} onStopSubagent={onStopSubagent} />
         break
       case "result":
         rendered = hideResult ? null : <ResultMessage key={message.id} message={message} />
@@ -460,6 +478,8 @@ const TranscriptSingleRow = memo(function TranscriptSingleRow({
   && prev.isFinalStatus === next.isFinalStatus
   && prev.onAskUserQuestionSubmit === next.onAskUserQuestionSubmit
   && prev.onExitPlanModeConfirm === next.onExitPlanModeConfirm
+  && prev.onOpenSubagent === next.onOpenSubagent
+  && prev.onStopSubagent === next.onStopSubagent
   && sameMessage(prev.message, next.message)
 ))
 
@@ -471,6 +491,8 @@ interface TranscriptToolGroupProps {
   localPath?: string
   expanded: boolean
   onExpandedChange: (groupId: string, next: boolean) => void
+  onOpenSubagent?: (threadId: string) => void
+  onStopSubagent?: (threadId: string) => void
 }
 
 const TranscriptToolGroup = memo(function TranscriptToolGroup({
@@ -481,6 +503,8 @@ const TranscriptToolGroup = memo(function TranscriptToolGroup({
   localPath,
   expanded,
   onExpandedChange,
+  onOpenSubagent,
+  onStopSubagent,
 }: TranscriptToolGroupProps) {
   return (
     <div
@@ -493,6 +517,8 @@ const TranscriptToolGroup = memo(function TranscriptToolGroup({
         localPath={localPath}
         expanded={expanded}
         onExpandedChange={(next) => onExpandedChange(id, next)}
+        onOpenSubagent={onOpenSubagent}
+        onStopSubagent={onStopSubagent}
       />
     </div>
   )
@@ -503,6 +529,8 @@ const TranscriptToolGroup = memo(function TranscriptToolGroup({
   && prev.localPath === next.localPath
   && prev.expanded === next.expanded
   && prev.onExpandedChange === next.onExpandedChange
+  && prev.onOpenSubagent === next.onOpenSubagent
+  && prev.onStopSubagent === next.onStopSubagent
   && prev.messages.length === next.messages.length
   && prev.messages.every((message, index) => sameMessage(message, next.messages[index]!))
 ))
@@ -574,6 +602,8 @@ interface KannaTranscriptProps {
     answers: AskUserQuestionAnswerMap
   ) => void
   onExitPlanModeConfirm: (toolUseId: string, confirmed: boolean, clearContext?: boolean, message?: string) => void
+  onOpenSubagent?: (threadId: string) => void
+  onStopSubagent?: (threadId: string) => void
 }
 
 interface KannaTranscriptRowProps {
@@ -586,6 +616,8 @@ interface KannaTranscriptRowProps {
     answers: AskUserQuestionAnswerMap
   ) => void
   onExitPlanModeConfirm: (toolUseId: string, confirmed: boolean, clearContext?: boolean, message?: string) => void
+  onOpenSubagent?: (threadId: string) => void
+  onStopSubagent?: (threadId: string) => void
 }
 
 export const KannaTranscriptRow = memo(function KannaTranscriptRow({
@@ -594,6 +626,8 @@ export const KannaTranscriptRow = memo(function KannaTranscriptRow({
   onToolGroupExpandedChange,
   onAskUserQuestionSubmit,
   onExitPlanModeConfirm,
+  onOpenSubagent,
+  onStopSubagent,
 }: KannaTranscriptRowProps) {
   if (row.kind === "tool-group") {
     return (
@@ -605,6 +639,8 @@ export const KannaTranscriptRow = memo(function KannaTranscriptRow({
         localPath={row.localPath}
         expanded={toolGroupExpanded ?? false}
         onExpandedChange={onToolGroupExpandedChange}
+        onOpenSubagent={onOpenSubagent}
+        onStopSubagent={onStopSubagent}
       />
     )
   }
@@ -624,6 +660,8 @@ export const KannaTranscriptRow = memo(function KannaTranscriptRow({
       isFinalStatus={row.isFinalStatus}
       onAskUserQuestionSubmit={onAskUserQuestionSubmit}
       onExitPlanModeConfirm={onExitPlanModeConfirm}
+      onOpenSubagent={onOpenSubagent}
+      onStopSubagent={onStopSubagent}
     />
   )
 }, (prev, next) => {
@@ -631,6 +669,8 @@ export const KannaTranscriptRow = memo(function KannaTranscriptRow({
   if (prev.onToolGroupExpandedChange !== next.onToolGroupExpandedChange) return false
   if (prev.onAskUserQuestionSubmit !== next.onAskUserQuestionSubmit) return false
   if (prev.onExitPlanModeConfirm !== next.onExitPlanModeConfirm) return false
+  if (prev.onOpenSubagent !== next.onOpenSubagent) return false
+  if (prev.onStopSubagent !== next.onStopSubagent) return false
   if (prev.row.kind !== next.row.kind) return false
   if (prev.row.id !== next.row.id) return false
 
@@ -669,6 +709,8 @@ function KannaTranscriptImpl({
   onOpenLocalLink,
   onAskUserQuestionSubmit,
   onExitPlanModeConfirm,
+  onOpenSubagent,
+  onStopSubagent,
 }: KannaTranscriptProps) {
   const [toolGroupExpanded, setToolGroupExpanded] = useState<Record<string, boolean>>({})
   const rows = useMemo(() => buildResolvedTranscriptRows(messages, {
@@ -700,6 +742,8 @@ function KannaTranscriptImpl({
             onToolGroupExpandedChange={handleToolGroupExpandedChange}
             onAskUserQuestionSubmit={onAskUserQuestionSubmit}
             onExitPlanModeConfirm={onExitPlanModeConfirm}
+            onOpenSubagent={onOpenSubagent}
+            onStopSubagent={onStopSubagent}
           />
         </div>
       ))}

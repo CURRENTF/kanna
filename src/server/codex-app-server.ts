@@ -4,7 +4,11 @@ import { createInterface } from "node:readline"
 import type { Readable, Writable } from "node:stream"
 import type {
   AskUserQuestionItem,
+  ChatAttachment,
+  CodexApprovalPolicy,
   CodexReasoningEffort,
+  CodexReviewTarget,
+  CodexSandboxMode,
   ContextWindowUsageSnapshot,
   ServiceTier,
   TodoItem,
@@ -14,7 +18,9 @@ import type { HarnessEvent, HarnessToolRequest, HarnessTurn } from "./harness-ty
 import {
   type CollabAgentToolCallItem,
   type CommandExecutionOutputDeltaNotification,
+  type AgentMessageDeltaNotification,
   type ContextCompactedNotification,
+  type ConfigReadResponse,
   type CodexRequestId,
   type CommandExecutionApprovalDecision,
   type CommandExecutionRequestApprovalParams,
@@ -22,23 +28,44 @@ import {
   type DynamicToolCallOutputContentItem,
   type DynamicToolCallResponse,
   type FileChangeApprovalDecision,
+  type FileChangeItem,
+  type FileChangePatchUpdatedNotification,
   type FileChangeRequestApprovalParams,
   type FileChangeRequestApprovalResponse,
   type InitializeParams,
   type ItemCompletedNotification,
   type ItemStartedNotification,
   type JsonRpcResponse,
+  type HooksListResponse,
   type McpToolCallItem,
+  type McpToolCallProgressNotification,
+  type McpServerStatusListResponse,
   type PlanDeltaNotification,
+  type PluginListResponse,
   type RawResponseItemCompletedNotification,
+  type ReviewStartParams,
+  type ReviewStartResponse,
+  type SandboxPolicy,
+  type ReasoningSummaryTextDeltaNotification,
   type ServerNotification,
   type ServerRequest,
+  type SkillsListResponse,
   type ThreadGoalClearParams,
   type ThreadGoalClearResponse,
   type ThreadGoalGetParams,
   type ThreadGoalGetResponse,
   type ThreadGoalSetParams,
   type ThreadGoalSetResponse,
+  type CodexThreadRecord,
+  type ThreadArchiveParams,
+  type ThreadDeleteParams,
+  type ThreadListParams,
+  type ThreadListResponse,
+  type ThreadReadParams,
+  type ThreadReadResponse,
+  type ThreadSetNameParams,
+  type CodexModelRecord,
+  type ModelListResponse,
   type ThreadItem,
   type ThreadResumeParams,
   type ThreadResumeResponse,
@@ -54,8 +81,12 @@ import {
   type TurnPlanUpdatedNotification,
   type TurnCompletedNotification,
   type TurnInterruptParams,
+  type TurnDiffUpdatedNotification,
   type TurnStartParams,
   type TurnStartResponse,
+  type CodexUserInput,
+  type TurnSteerParams,
+  type TurnSteerResponse,
   isJsonRpcResponse,
   isServerNotification,
   isServerRequest,
@@ -79,6 +110,13 @@ interface PendingRequest<TResult> {
   method: string
   resolve: (value: TResult) => void
   reject: (error: Error) => void
+}
+
+interface ConnectionContext {
+  child: CodexAppServerProcess
+  pendingRequests: Map<CodexRequestId, PendingRequest<unknown>>
+  stderrLines: string[]
+  closed: boolean
 }
 
 interface PendingTurn {
@@ -115,11 +153,13 @@ interface PendingTurn {
 interface SessionContext {
   chatId: string
   cwd: string
-  child: CodexAppServerProcess
-  pendingRequests: Map<CodexRequestId, PendingRequest<unknown>>
+  connection: ConnectionContext
   pendingTurn: PendingTurn | null
   sessionToken: string | null
-  stderrLines: string[]
+  model: string
+  serviceTier?: ServiceTier
+  approvalPolicy: CodexApprovalPolicy
+  sandboxMode: CodexSandboxMode
   closed: boolean
 }
 
@@ -135,6 +175,8 @@ export interface StartCodexSessionArgs {
   serviceTier?: ServiceTier
   sessionToken: string | null
   pendingForkSessionToken?: string | null
+  approvalPolicy?: CodexApprovalPolicy
+  sandboxMode?: CodexSandboxMode
 }
 
 export interface StartCodexTurnArgs {
@@ -143,9 +185,54 @@ export interface StartCodexTurnArgs {
   effort?: CodexReasoningEffort
   serviceTier?: ServiceTier
   content: string
+  attachments?: ChatAttachment[]
   planMode: boolean
+  approvalPolicy?: CodexApprovalPolicy
   onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
   onApprovalRequest?: PendingTurn["onApprovalRequest"]
+}
+
+export interface StartCodexReviewArgs {
+  chatId: string
+  model: string
+  target: CodexReviewTarget
+  onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
+  onApprovalRequest?: PendingTurn["onApprovalRequest"]
+}
+
+function codexTurnInput(content: string, attachments: ChatAttachment[] = []): CodexUserInput[] {
+  const input: CodexUserInput[] = []
+  const text = content.trim()
+  if (text) {
+    input.push({ type: "text", text, text_elements: [] })
+  }
+  for (const attachment of attachments) {
+    if (attachment.kind === "image") {
+      input.push({ type: "localImage", path: attachment.absolutePath, detail: "auto" })
+    } else {
+      input.push({ type: "mention", name: attachment.displayName, path: attachment.absolutePath })
+    }
+  }
+  if (input.length === 0) {
+    input.push({ type: "text", text: "Please inspect the attached context.", text_elements: [] })
+  }
+  return input
+}
+
+function codexSandboxPolicy(mode: CodexSandboxMode, cwd: string): SandboxPolicy {
+  if (mode === "danger-full-access") {
+    return { type: "dangerFullAccess" }
+  }
+  if (mode === "read-only") {
+    return { type: "readOnly", networkAccess: false }
+  }
+  return {
+    type: "workspaceWrite",
+    writableRoots: [cwd],
+    networkAccess: false,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false,
+  }
 }
 
 export interface GenerateStructuredArgs {
@@ -242,6 +329,84 @@ function toToolRequestUserInputResponse(raw: unknown, questions: ToolRequestUser
     })
   )
   return { answers }
+}
+
+function approvalAnswer(raw: unknown): string {
+  const record = asRecord(raw)
+  const answers = asRecord(record?.answers)
+  const value = answers?.approval
+  if (Array.isArray(value)) {
+    return value.find((entry): entry is string => typeof entry === "string") ?? ""
+  }
+  return typeof value === "string" ? value : ""
+}
+
+function questionAnswerValue(raw: unknown, id: string): unknown {
+  const record = asRecord(raw)
+  const answers = asRecord(record?.answers)
+  return answers?.[id] ?? record?.[id]
+}
+
+function questionAnswer(raw: unknown, id: string): string {
+  const value = questionAnswerValue(raw, id)
+  if (Array.isArray(value)) {
+    return value.find((entry): entry is string => typeof entry === "string") ?? ""
+  }
+  return typeof value === "string" ? value : ""
+}
+
+function parseElicitationValue(value: unknown, type?: string) {
+  if (type === "array") {
+    if (Array.isArray(value)) {
+      return value.map((entry) => String(entry)).filter(Boolean)
+    }
+    return typeof value === "string"
+      ? value.split(",").map((entry) => entry.trim()).filter(Boolean)
+      : []
+  }
+  const text = Array.isArray(value)
+    ? value.find((entry): entry is string => typeof entry === "string") ?? ""
+    : typeof value === "string"
+      ? value
+      : value == null
+        ? ""
+        : String(value)
+  if (type === "boolean") return text.toLowerCase() === "true"
+  if (type === "number" || type === "integer") {
+    const parsed = Number(text)
+    return Number.isFinite(parsed) ? parsed : text
+  }
+  return text
+}
+
+function approvalQuestionTool(
+  toolId: string,
+  question: string,
+  reason?: string | null,
+): HarnessToolRequest {
+  return {
+    tool: {
+      kind: "tool",
+      toolKind: "ask_user_question",
+      toolName: "AskUserQuestion",
+      toolId,
+      input: {
+        questions: [{
+          id: "approval",
+          header: "Approval",
+          question,
+          options: [
+            { label: "Approve once", description: reason ?? "Allow this action once" },
+            { label: "Approve for session", description: "Allow similar actions for the rest of this Codex session" },
+            { label: "Decline", description: "Do not run this action" },
+            { label: "Cancel turn", description: "Cancel the current Codex turn" },
+          ],
+          multiSelect: false,
+        }],
+      },
+      rawInput: { question, reason },
+    },
+  }
 }
 
 function contentFromMcpResult(item: McpToolCallItem): unknown {
@@ -386,6 +551,10 @@ function collabToolCall(item: CollabAgentToolCallItem): TranscriptEntry {
       toolId: item.id,
       input: {
         subagentType: item.tool,
+        senderThreadId: item.senderThreadId,
+        receiverThreadIds: item.receiverThreadIds,
+        prompt: item.prompt ?? null,
+        agentsStates: item.agentsStates ?? {},
       },
       rawInput: item as unknown as Record<string, unknown>,
     },
@@ -744,6 +913,59 @@ function itemToToolResults(item: ThreadItem, commandOutputByItemId?: Map<string,
   }
 }
 
+function codexUserMessageText(item: Extract<ThreadItem, { type: "userMessage" }>) {
+  return item.content
+    .flatMap((content) => content.type === "text" ? [content.text] : [])
+    .join("\n")
+    .trim()
+}
+
+export function transcriptFromCodexThread(thread: CodexThreadRecord, model = "codex"): TranscriptEntry[] {
+  const entries: TranscriptEntry[] = [codexSystemInitEntry(model)]
+
+  for (const turn of thread.turns) {
+    const startedAt = (turn.startedAt ?? thread.createdAt) * 1_000
+    let sequence = 0
+    const nextTimestamp = () => startedAt + sequence++
+
+    for (const item of turn.items) {
+      if (item.type === "userMessage") {
+        const content = codexUserMessageText(item)
+        if (content) {
+          entries.push(timestamped({ kind: "user_prompt", content }, nextTimestamp()))
+        }
+        continue
+      }
+      if (item.type === "agentMessage") {
+        if (item.text.trim()) {
+          entries.push(timestamped({ kind: "assistant_text", text: item.text }, nextTimestamp()))
+        }
+        continue
+      }
+      if (item.type === "plan" || item.type === "reasoning") {
+        continue
+      }
+
+      for (const entry of itemToToolCalls(item)) {
+        entries.push({ ...entry, createdAt: nextTimestamp() })
+      }
+      for (const entry of itemToToolResults(item)) {
+        entries.push({ ...entry, createdAt: nextTimestamp() })
+      }
+    }
+
+    entries.push(timestamped({
+      kind: "result",
+      subtype: turn.status === "failed" ? "error" : turn.status === "interrupted" ? "cancelled" : "success",
+      isError: turn.status === "failed",
+      durationMs: turn.durationMs ?? 0,
+      result: turn.error?.message ?? "",
+    }, (turn.completedAt ?? turn.startedAt ?? thread.updatedAt) * 1_000))
+  }
+
+  return entries
+}
+
 class AsyncQueue<T> implements AsyncIterable<T> {
   private values: T[] = []
   private resolvers: Array<(value: IteratorResult<T>) => void> = []
@@ -787,61 +1009,125 @@ class AsyncQueue<T> implements AsyncIterable<T> {
 
 export class CodexAppServerManager {
   private readonly sessions = new Map<string, SessionContext>()
+  private readonly chatIdByThreadId = new Map<string, string>()
   private readonly spawnProcess: SpawnCodexAppServer
+  private connection: ConnectionContext | null = null
+  private connectionPromise: Promise<ConnectionContext> | null = null
 
   constructor(args: { spawnProcess?: SpawnCodexAppServer } = {}) {
-    this.spawnProcess = args.spawnProcess ?? ((cwd) =>
-      spawn("codex", ["app-server"], {
+    this.spawnProcess = args.spawnProcess ?? ((cwd) => {
+      const codexBinary = process.env.KANNA_CODEX_BINARY?.trim() || "codex"
+      return spawn(codexBinary, ["app-server"], {
         cwd,
         stdio: ["pipe", "pipe", "pipe"],
         env: process.env,
-      }) as unknown as CodexAppServerProcess)
+      }) as unknown as CodexAppServerProcess
+    })
+  }
+
+  private async createInitializedConnection(cwd: string) {
+    const child = this.spawnProcess(cwd)
+    const context: ConnectionContext = {
+      child,
+      pendingRequests: new Map(),
+      stderrLines: [],
+      closed: false,
+    }
+    this.connection = context
+    this.attachListeners(context)
+
+    try {
+      await this.sendRequest(context, "initialize", {
+        clientInfo: {
+          name: "kanna_web",
+          title: "Kanna",
+          version: "0.41.7",
+        },
+        capabilities: {
+          experimentalApi: true,
+        },
+      } satisfies InitializeParams)
+      this.writeMessage(context, { method: "initialized" })
+      return context
+    } catch (error) {
+      this.failConnection(context, error instanceof Error ? error.message : String(error))
+      throw error
+    }
+  }
+
+  private async ensureConnection(cwd: string) {
+    if (this.connection && !this.connection.closed) {
+      return this.connection
+    }
+    if (!this.connectionPromise) {
+      const promise = this.createInitializedConnection(cwd)
+      this.connectionPromise = promise
+      void promise.catch(() => {
+        if (this.connectionPromise === promise) {
+          this.connectionPromise = null
+        }
+      })
+    }
+    return await this.connectionPromise
+  }
+
+  private async withControlContext<T>(cwd: string, run: (context: ConnectionContext) => Promise<T>) {
+    const context = await this.ensureConnection(cwd)
+    try {
+      return await run(context)
+    } catch (error) {
+      if (context.closed) {
+        this.connectionPromise = null
+      }
+      throw error
+    }
   }
 
   async startSession(args: StartCodexSessionArgs) {
     const existing = this.sessions.get(args.chatId)
-    if (existing && !existing.closed && existing.cwd === args.cwd && !args.pendingForkSessionToken) {
-      return
+    const approvalPolicy = args.approvalPolicy ?? "on-request"
+    const sandboxMode = args.sandboxMode ?? "workspace-write"
+    if (
+      existing
+      && !existing.closed
+      && !existing.connection.closed
+      && existing.cwd === args.cwd
+      && existing.model === args.model
+      && existing.serviceTier === args.serviceTier
+      && existing.approvalPolicy === approvalPolicy
+      && existing.sandboxMode === sandboxMode
+      && (!args.sessionToken || args.sessionToken === existing.sessionToken)
+      && !args.pendingForkSessionToken
+    ) {
+      return existing.sessionToken ?? undefined
     }
 
+    const sessionToken = args.sessionToken ?? existing?.sessionToken ?? null
     if (existing) {
       this.stopSession(args.chatId)
     }
 
-    const child = this.spawnProcess(args.cwd)
+    const connection = await this.ensureConnection(args.cwd)
     const context: SessionContext = {
       chatId: args.chatId,
       cwd: args.cwd,
-      child,
-      pendingRequests: new Map(),
+      connection,
       pendingTurn: null,
       sessionToken: null,
-      stderrLines: [],
+      model: args.model,
+      serviceTier: args.serviceTier,
+      approvalPolicy,
+      sandboxMode,
       closed: false,
     }
     this.sessions.set(args.chatId, context)
-    this.attachListeners(context)
-
-    await this.sendRequest(context, "initialize", {
-      clientInfo: {
-        name: "kanna_desktop",
-        title: "Kanna",
-        version: "0.1.0",
-      },
-      capabilities: {
-        experimentalApi: true,
-      },
-    } satisfies InitializeParams)
-    this.writeMessage(context, {
-      method: "initialized",
-    })
 
     const threadParams = {
       model: args.model,
       cwd: args.cwd,
       serviceTier: args.serviceTier,
-      approvalPolicy: "never",
-      sandbox: "danger-full-access",
+      approvalPolicy,
+      sandbox: sandboxMode,
       experimentalRawEvents: true,
       persistExtendedHistory: false,
     } satisfies ThreadStartParams
@@ -853,20 +1139,20 @@ export class CodexAppServerManager {
         model: args.model,
         cwd: args.cwd,
         serviceTier: args.serviceTier,
-          approvalPolicy: "never",
-          sandbox: "danger-full-access",
+          approvalPolicy,
+          sandbox: sandboxMode,
           experimentalRawEvents: true,
           persistExtendedHistory: false,
         } satisfies ThreadForkParams)
-    } else if (args.sessionToken) {
+    } else if (sessionToken) {
       try {
         response = await this.sendRequest<ThreadResumeResponse>(context, "thread/resume", {
-          threadId: args.sessionToken,
+          threadId: sessionToken,
           model: args.model,
           cwd: args.cwd,
           serviceTier: args.serviceTier,
-          approvalPolicy: "never",
-          sandbox: "danger-full-access",
+          approvalPolicy,
+          sandbox: sandboxMode,
           experimentalRawEvents: true,
           persistExtendedHistory: false,
         } satisfies ThreadResumeParams)
@@ -881,8 +1167,249 @@ export class CodexAppServerManager {
       response = await this.sendRequest<ThreadStartResponse>(context, "thread/start", threadParams)
     }
 
-    context.sessionToken = response.thread.id
+    this.bindSessionThread(context, response.thread.id)
     return context.sessionToken
+  }
+
+  private bindSessionThread(context: SessionContext, threadId: string) {
+    if (context.sessionToken) {
+      this.chatIdByThreadId.delete(context.sessionToken)
+    }
+    context.sessionToken = threadId
+    this.chatIdByThreadId.set(threadId, context.chatId)
+  }
+
+  async listThreads(cwd: string, archived = false, limit?: number): Promise<CodexThreadRecord[]> {
+    if (limit !== undefined && limit <= 0) return []
+    return await this.withControlContext(cwd, async (context) => {
+      const threads: CodexThreadRecord[] = []
+      let cursor: string | null = null
+      do {
+        const response: ThreadListResponse = await this.sendRequest<ThreadListResponse>(context, "thread/list", {
+          cursor,
+          limit: limit === undefined
+            ? 100
+            : Math.min(100, Math.max(1, limit - threads.length)),
+          sortKey: "updated_at",
+          sortDirection: "desc",
+          archived,
+          cwd,
+        } satisfies ThreadListParams)
+        threads.push(...response.data.map((thread) => ({ ...thread, archived })))
+        cursor = response.nextCursor
+      } while (cursor && (limit === undefined || threads.length < limit))
+      return limit === undefined ? threads : threads.slice(0, limit)
+    })
+  }
+
+  async listModels(cwd: string): Promise<CodexModelRecord[]> {
+    return await this.withControlContext(cwd, async (context) => {
+      const models: CodexModelRecord[] = []
+      let cursor: string | null = null
+      do {
+        const response: ModelListResponse = await this.sendRequest<ModelListResponse>(context, "model/list", {
+          cursor,
+          limit: 100,
+          includeHidden: false,
+        })
+        models.push(...response.data.filter((model) => !model.hidden))
+        cursor = response.nextCursor
+      } while (cursor)
+      return models
+    })
+  }
+
+  async readManagementSnapshot(cwd: string) {
+    return await this.withControlContext(cwd, async (context) => {
+      const [config, hooks, skills, plugins] = await Promise.all([
+        this.sendRequest<ConfigReadResponse>(context, "config/read", { cwd, includeLayers: true }),
+        this.sendRequest<HooksListResponse>(context, "hooks/list", { cwds: [cwd] }),
+        this.sendRequest<SkillsListResponse>(context, "skills/list", { cwds: [cwd], forceReload: true }),
+        this.sendRequest<PluginListResponse>(context, "plugin/list", { cwds: [cwd] }),
+      ])
+      const mcpServers: McpServerStatusListResponse["data"] = []
+      let cursor: string | null = null
+      do {
+        const response: McpServerStatusListResponse = await this.sendRequest<McpServerStatusListResponse>(context, "mcpServerStatus/list", {
+          cursor,
+          limit: 100,
+          detail: "toolsAndAuthOnly",
+        })
+        mcpServers.push(...response.data)
+        cursor = response.nextCursor
+      } while (cursor)
+
+      return {
+        cwd,
+        config: config.config,
+        configLayers: config.layers ?? [],
+        skills: skills.data.flatMap((entry) => entry.skills),
+        hooks: hooks.data.map((entry) => ({
+          cwd: entry.cwd,
+          warnings: entry.warnings,
+          errors: entry.errors,
+          hooks: entry.hooks.map((hook) => ({
+            key: typeof hook.key === "string" ? hook.key : "",
+            eventName: typeof hook.eventName === "string" ? hook.eventName : "unknown",
+            command: typeof hook.command === "string" ? hook.command : null,
+            sourcePath: typeof hook.sourcePath === "string" ? hook.sourcePath : "",
+            source: typeof hook.source === "string" ? hook.source : "unknown",
+            enabled: hook.enabled !== false,
+            trustStatus: typeof hook.trustStatus === "string" ? hook.trustStatus : "unknown",
+          })),
+        })),
+        mcpServers: mcpServers.map((server) => ({
+          name: server.name,
+          authStatus: server.authStatus,
+          toolCount: Object.keys(server.tools ?? {}).length,
+          resourceCount: server.resources?.length ?? 0,
+        })),
+        marketplaces: plugins.marketplaces.map((marketplace) => ({
+          name: marketplace.name,
+          path: marketplace.path,
+          displayName: marketplace.interface?.displayName ?? null,
+          plugins: marketplace.plugins.map((plugin) => ({
+            id: plugin.id,
+            name: plugin.name,
+            version: plugin.version,
+            installed: plugin.installed,
+            enabled: plugin.enabled,
+            availability: plugin.availability,
+            description: plugin.interface?.shortDescription ?? null,
+          })),
+        })),
+        marketplaceLoadErrors: plugins.marketplaceLoadErrors,
+      }
+    })
+  }
+
+  async writeConfigValue(cwd: string, keyPath: string, value: unknown) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest(context, "config/value/write", {
+      keyPath,
+      value,
+      mergeStrategy: "upsert",
+    }))
+  }
+
+  async toggleSkill(cwd: string, skillPath: string, enabled: boolean) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest(context, "skills/config/write", {
+      path: skillPath,
+      enabled,
+    }))
+  }
+
+  async installPlugin(cwd: string, params: { pluginName: string; marketplacePath?: string | null; remoteMarketplaceName?: string | null }) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest(context, "plugin/install", params))
+  }
+
+  async uninstallPlugin(cwd: string, pluginId: string) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest(context, "plugin/uninstall", { pluginId }))
+  }
+
+  async addMarketplace(cwd: string, source: string) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest(context, "marketplace/add", { source }))
+  }
+
+  async removeMarketplace(cwd: string, marketplaceName: string) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest(context, "marketplace/remove", { marketplaceName }))
+  }
+
+  async upgradeMarketplaces(cwd: string, marketplaceName?: string | null) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest(context, "marketplace/upgrade", { marketplaceName }))
+  }
+
+  async startMcpOauth(cwd: string, name: string) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest<{ authorizationUrl: string }>(context, "mcpServer/oauth/login", { name }))
+  }
+
+  async reloadMcp(cwd: string) {
+    return await this.withControlContext(cwd, (context) => this.sendRequest(context, "config/mcpServer/reload", undefined))
+  }
+
+  async readThread(cwd: string, threadId: string): Promise<CodexThreadRecord> {
+    return await this.withControlContext(cwd, async (context) => {
+      const response = await this.sendRequest<ThreadReadResponse>(context, "thread/read", {
+        threadId,
+        includeTurns: true,
+      } satisfies ThreadReadParams)
+      return response.thread
+    })
+  }
+
+  async interruptThread(cwd: string, threadId: string) {
+    return await this.withControlContext(cwd, async (context) => {
+      const response = await this.sendRequest<ThreadReadResponse>(context, "thread/read", {
+        threadId,
+        includeTurns: true,
+      } satisfies ThreadReadParams)
+      const activeTurn = [...response.thread.turns].reverse().find((turn) => turn.status === "inProgress")
+      if (!activeTurn) return false
+      await this.sendRequest(context, "turn/interrupt", {
+        threadId,
+        turnId: activeTurn.id,
+      } satisfies TurnInterruptParams)
+      return true
+    })
+  }
+
+  async readThreads(cwd: string, threadIds: string[]): Promise<CodexThreadRecord[]> {
+    if (threadIds.length === 0) return []
+    return await this.withControlContext(cwd, async (context) => {
+      const threads: CodexThreadRecord[] = []
+      for (const threadId of threadIds) {
+        const response = await this.sendRequest<ThreadReadResponse>(context, "thread/read", {
+          threadId,
+          includeTurns: true,
+        } satisfies ThreadReadParams)
+        threads.push(response.thread)
+      }
+      return threads
+    })
+  }
+
+  async setThreadName(chatId: string, cwd: string, threadId: string, name: string) {
+    const active = this.sessions.get(chatId)
+    if (active && !active.closed) {
+      await this.sendRequest(active, "thread/name/set", { threadId, name } satisfies ThreadSetNameParams)
+      return
+    }
+    await this.withControlContext(cwd, async (context) => {
+      await this.sendRequest(context, "thread/name/set", { threadId, name } satisfies ThreadSetNameParams)
+    })
+  }
+
+  async archiveThread(chatId: string, cwd: string, threadId: string) {
+    const active = this.sessions.get(chatId)
+    if (active && !active.closed) {
+      await this.sendRequest(active, "thread/archive", { threadId } satisfies ThreadArchiveParams)
+      return
+    }
+    await this.withControlContext(cwd, async (context) => {
+      await this.sendRequest(context, "thread/archive", { threadId } satisfies ThreadArchiveParams)
+    })
+  }
+
+  async unarchiveThread(chatId: string, cwd: string, threadId: string) {
+    const active = this.sessions.get(chatId)
+    if (active && !active.closed) {
+      await this.sendRequest(active, "thread/unarchive", { threadId } satisfies ThreadArchiveParams)
+      return
+    }
+    await this.withControlContext(cwd, async (context) => {
+      await this.sendRequest(context, "thread/unarchive", { threadId } satisfies ThreadArchiveParams)
+    })
+  }
+
+  async deleteThread(chatId: string, cwd: string, threadId: string) {
+    const active = this.sessions.get(chatId)
+    if (active && !active.closed) {
+      await this.sendRequest(active, "thread/delete", { threadId } satisfies ThreadDeleteParams)
+      this.stopSession(chatId)
+      return
+    }
+    await this.withControlContext(cwd, async (context) => {
+      await this.sendRequest(context, "thread/delete", { threadId } satisfies ThreadDeleteParams)
+    })
   }
 
   async startTurn(args: StartCodexTurnArgs): Promise<HarnessTurn> {
@@ -902,14 +1429,9 @@ export class CodexAppServerManager {
     try {
       const response = await this.sendRequest<TurnStartResponse>(context, "turn/start", {
         threadId: context.sessionToken ?? "",
-        input: [
-          {
-            type: "text",
-            text: args.content,
-            text_elements: [],
-          },
-        ],
-        approvalPolicy: "never",
+        input: codexTurnInput(args.content, args.attachments),
+        approvalPolicy: args.approvalPolicy ?? "on-request",
+        sandboxPolicy: codexSandboxPolicy(context.sandboxMode, context.cwd),
         model: args.model,
         effort: args.effort,
         serviceTier: args.serviceTier,
@@ -955,6 +1477,53 @@ export class CodexAppServerManager {
     }
   }
 
+  async startReview(args: StartCodexReviewArgs): Promise<HarnessTurn> {
+    const context = this.requireSession(args.chatId)
+    if (context.pendingTurn) {
+      throw new Error("Codex turn is already running")
+    }
+
+    const { queue, pendingTurn } = this.createPendingTurn(context, {
+      model: args.model,
+      planMode: false,
+      onToolRequest: args.onToolRequest,
+      onApprovalRequest: args.onApprovalRequest,
+    })
+    context.pendingTurn = pendingTurn
+
+    try {
+      const response = await this.sendRequest<ReviewStartResponse>(context, "review/start", {
+        threadId: context.sessionToken ?? "",
+        target: args.target,
+        delivery: "inline",
+      } satisfies ReviewStartParams)
+      pendingTurn.turnId = response.turn.id
+    } catch (error) {
+      context.pendingTurn = null
+      queue.finish()
+      throw error
+    }
+
+    return {
+      provider: "codex",
+      stream: queue,
+      interrupt: async () => {
+        const activeTurn = context.pendingTurn
+        if (!activeTurn?.turnId) return
+        await this.sendRequest(context, "turn/interrupt", {
+          threadId: context.sessionToken ?? "",
+          turnId: activeTurn.turnId,
+        } satisfies TurnInterruptParams)
+      },
+      close: () => {
+        if (context.pendingTurn === pendingTurn) {
+          context.pendingTurn = null
+        }
+        queue.finish()
+      },
+    }
+  }
+
   async getGoal(chatId: string) {
     const context = this.requireSession(chatId)
     if (!context.sessionToken) {
@@ -964,6 +1533,19 @@ export class CodexAppServerManager {
       threadId: context.sessionToken,
     } satisfies ThreadGoalGetParams)
     return response.goal
+  }
+
+  async steerTurn(chatId: string, content: string, attachments: ChatAttachment[] = []) {
+    const context = this.requireSession(chatId)
+    if (!context.pendingTurn?.turnId || !context.sessionToken) {
+      throw new Error("Codex turn is not ready to steer")
+    }
+    const response = await this.sendRequest<TurnSteerResponse>(context, "turn/steer", {
+      threadId: context.sessionToken,
+      expectedTurnId: context.pendingTurn.turnId,
+      input: codexTurnInput(content, attachments),
+    } satisfies TurnSteerParams)
+    return response.turnId
   }
 
   async setGoal(
@@ -1136,6 +1718,8 @@ export class CodexAppServerManager {
         model: args.model ?? "gpt-5.5",
         serviceTier: args.serviceTier ?? "fast",
         sessionToken: null,
+        approvalPolicy: "never",
+        sandboxMode: "workspace-write",
       })
 
       turn = await this.startTurn({
@@ -1145,6 +1729,7 @@ export class CodexAppServerManager {
         serviceTier: args.serviceTier ?? "fast",
         content: args.prompt,
         planMode: false,
+        approvalPolicy: "never",
         onToolRequest: async () => ({}),
       })
 
@@ -1171,29 +1756,42 @@ export class CodexAppServerManager {
     if (!context) return
     context.closed = true
     context.pendingTurn?.queue.finish()
+    context.pendingTurn = null
     this.sessions.delete(chatId)
+    if (context.sessionToken) {
+      this.chatIdByThreadId.delete(context.sessionToken)
+    }
+  }
+
+  stopAll() {
+    for (const chatId of [...this.sessions.keys()]) {
+      this.stopSession(chatId)
+    }
+    const connection = this.connection
+    this.connection = null
+    this.connectionPromise = null
+    if (!connection || connection.closed) return
+    connection.closed = true
+    for (const pending of connection.pendingRequests.values()) {
+      pending.reject(new Error("Codex app-server stopped"))
+    }
+    connection.pendingRequests.clear()
     try {
-      context.child.kill("SIGKILL")
+      connection.child.kill("SIGKILL")
     } catch {
       // ignore kill failures
     }
   }
 
-  stopAll() {
-    for (const chatId of this.sessions.keys()) {
-      this.stopSession(chatId)
-    }
-  }
-
   private requireSession(chatId: string) {
     const context = this.sessions.get(chatId)
-    if (!context || context.closed) {
+    if (!context || context.closed || context.connection.closed) {
       throw new Error("Codex session not started")
     }
     return context
   }
 
-  private attachListeners(context: SessionContext) {
+  private attachListeners(context: ConnectionContext) {
     const lines = createInterface({ input: context.child.stdout })
     void (async () => {
       for await (const line of lines) {
@@ -1226,7 +1824,7 @@ export class CodexAppServerManager {
     })()
 
     context.child.on("error", (error) => {
-      this.failContext(context, error.message)
+      this.failConnection(context, error.message)
     })
 
     context.child.on("close", (code) => {
@@ -1234,12 +1832,12 @@ export class CodexAppServerManager {
       queueMicrotask(() => {
         if (context.closed) return
         const message = context.stderrLines.at(-1) || `Codex app-server exited with code ${code ?? 1}`
-        this.failContext(context, message)
+        this.failConnection(context, message)
       })
     })
   }
 
-  private handleResponse(context: SessionContext, response: JsonRpcResponse) {
+  private handleResponse(context: ConnectionContext, response: JsonRpcResponse) {
     const pending = context.pendingRequests.get(response.id)
     if (!pending) return
     context.pendingRequests.delete(response.id)
@@ -1250,13 +1848,114 @@ export class CodexAppServerManager {
     pending.resolve(response.result)
   }
 
-  private async handleServerRequest(context: SessionContext, request: ServerRequest) {
-    const pendingTurn = context.pendingTurn
-    if (!pendingTurn) {
-      this.writeMessage(context, {
+  private sessionForThreadId(threadId: string | null | undefined) {
+    if (!threadId) return null
+    const chatId = this.chatIdByThreadId.get(threadId)
+    return chatId ? this.sessions.get(chatId) ?? null : null
+  }
+
+  private sessionForTurnId(turnId: string | null | undefined) {
+    if (!turnId) return null
+    for (const context of this.sessions.values()) {
+      if (context.pendingTurn?.turnId === turnId) return context
+    }
+    return null
+  }
+
+  private async handleServerRequest(connection: ConnectionContext, request: ServerRequest) {
+    const context = this.sessionForThreadId(request.params.threadId)
+    const pendingTurn = context?.pendingTurn
+    if (!context || !pendingTurn) {
+      this.writeMessage(connection, {
         id: request.id,
         error: {
           message: "No active turn",
+        },
+      })
+      return
+    }
+
+    if (request.method === "mcpServer/elicitation/request") {
+      const actionRequest: HarnessToolRequest = {
+        tool: {
+          kind: "tool",
+          toolKind: "ask_user_question",
+          toolName: "AskUserQuestion",
+          toolId: `${String(request.id)}:mcp-action`,
+          input: {
+            questions: [{
+              id: "action",
+              header: "MCP request",
+              question: `${request.params.serverName}: ${request.params.message}${request.params.url ? `\n\n${request.params.url}` : ""}`,
+              options: [
+                { label: "Accept", description: "Continue with this MCP request" },
+                { label: "Decline", description: "Decline without cancelling the Codex turn" },
+                { label: "Cancel", description: "Cancel this MCP request" },
+              ],
+              multiSelect: false,
+            }],
+          },
+          rawInput: { ...request.params },
+        },
+      }
+      pendingTurn.queue.push({ type: "transcript", entry: timestamped({ kind: "tool_call", tool: actionRequest.tool }) })
+      const actionAnswer = questionAnswer(await pendingTurn.onToolRequest(actionRequest), "action")
+      const action = actionAnswer === "Accept" ? "accept" : actionAnswer === "Decline" ? "decline" : "cancel"
+      if (action !== "accept" || request.params.mode === "url") {
+        this.writeMessage(context, { id: request.id, result: { action, content: null, _meta: null } })
+        return
+      }
+
+      const properties = request.params.requestedSchema?.properties ?? {}
+      const questions: AskUserQuestionItem[] = Object.entries(properties).map(([id, schema]) => ({
+        id,
+        header: schema.title || id,
+        question: schema.description || schema.title || id,
+        options: Array.isArray(schema.enum)
+          ? schema.enum.map((value) => ({ label: String(value) }))
+          : undefined,
+        multiSelect: schema.type === "array",
+      }))
+      let content: Record<string, unknown> = {}
+      if (questions.length > 0) {
+        const formRequest: HarnessToolRequest = {
+          tool: {
+            kind: "tool",
+            toolKind: "ask_user_question",
+            toolName: "AskUserQuestion",
+            toolId: `${String(request.id)}:mcp-form`,
+            input: { questions },
+            rawInput: { ...request.params },
+          },
+        }
+        pendingTurn.queue.push({ type: "transcript", entry: timestamped({ kind: "tool_call", tool: formRequest.tool }) })
+        const formResult = await pendingTurn.onToolRequest(formRequest)
+        content = Object.fromEntries(Object.entries(properties).map(([id, schema]) => [
+          id,
+          parseElicitationValue(questionAnswerValue(formResult, id), schema.type),
+        ]))
+      }
+      this.writeMessage(context, { id: request.id, result: { action: "accept", content, _meta: null } })
+      return
+    }
+
+    if (request.method === "item/permissions/requestApproval") {
+      const permissionsRequest = approvalQuestionTool(
+        `${request.params.itemId}:permissions`,
+        `Allow additional permissions for this turn?\n\n${JSON.stringify(request.params.permissions, null, 2)}`,
+        request.params.reason,
+      )
+      pendingTurn.queue.push({ type: "transcript", entry: timestamped({ kind: "tool_call", tool: permissionsRequest.tool }) })
+      const answer = approvalAnswer(await pendingTurn.onToolRequest(permissionsRequest))
+      const approved = answer === "Approve once" || answer === "Approve for session"
+      this.writeMessage(context, {
+        id: request.id,
+        result: {
+          permissions: approved ? {
+            ...(request.params.permissions.network ? { network: request.params.permissions.network } : {}),
+            ...(request.params.permissions.fileSystem ? { fileSystem: request.params.permissions.fileSystem } : {}),
+          } : {},
+          scope: answer === "Approve for session" ? "session" : "turn",
         },
       })
       return
@@ -1368,11 +2067,25 @@ export class CodexAppServerManager {
     }
 
     if (request.method === "item/commandExecution/requestApproval") {
-      const decision = await pendingTurn.onApprovalRequest?.({
-        requestId: request.id,
-        kind: "command_execution",
-        params: request.params,
-      }) ?? "decline"
+      const decision = pendingTurn.onApprovalRequest
+        ? await pendingTurn.onApprovalRequest({
+            requestId: request.id,
+            kind: "command_execution",
+            params: request.params,
+          })
+        : await (async (): Promise<CommandExecutionApprovalDecision> => {
+            const toolRequest = approvalQuestionTool(
+              `${request.params.itemId}:approval`,
+              `Allow Codex to run this command?\n\n${request.params.command ?? "Command details unavailable"}`,
+              request.params.reason,
+            )
+            pendingTurn.queue.push({ type: "transcript", entry: timestamped({ kind: "tool_call", tool: toolRequest.tool }) })
+            const answer = approvalAnswer(await pendingTurn.onToolRequest(toolRequest))
+            if (answer === "Approve once") return "accept"
+            if (answer === "Approve for session") return "acceptForSession"
+            if (answer === "Cancel turn") return "cancel"
+            return "decline"
+          })()
       this.writeMessage(context, {
         id: request.id,
         result: {
@@ -1382,11 +2095,25 @@ export class CodexAppServerManager {
       return
     }
 
-    const decision = await pendingTurn.onApprovalRequest?.({
-      requestId: request.id,
-      kind: "file_change",
-      params: request.params,
-    }) ?? "decline"
+    const decision = pendingTurn.onApprovalRequest
+      ? await pendingTurn.onApprovalRequest({
+          requestId: request.id,
+          kind: "file_change",
+          params: request.params,
+        })
+      : await (async (): Promise<FileChangeApprovalDecision> => {
+          const toolRequest = approvalQuestionTool(
+            `${request.params.itemId}:approval`,
+            `Allow Codex to modify files${request.params.grantRoot ? ` under ${request.params.grantRoot}` : ""}?`,
+            request.params.reason,
+          )
+          pendingTurn.queue.push({ type: "transcript", entry: timestamped({ kind: "tool_call", tool: toolRequest.tool }) })
+          const answer = approvalAnswer(await pendingTurn.onToolRequest(toolRequest))
+          if (answer === "Approve once") return "accept"
+          if (answer === "Approve for session") return "acceptForSession"
+          if (answer === "Cancel turn") return "cancel"
+          return "decline"
+        })()
     this.writeMessage(context, {
       id: request.id,
       result: {
@@ -1395,9 +2122,16 @@ export class CodexAppServerManager {
     })
   }
 
-  private async handleNotification(context: SessionContext, notification: ServerNotification) {
+  private async handleNotification(_connection: ConnectionContext, notification: ServerNotification) {
+    const params = notification.params as {
+      threadId?: string | null
+      turnId?: string | null
+      thread?: { id?: string }
+    }
     if (notification.method === "thread/started") {
-      context.sessionToken = notification.params.thread.id
+      const context = this.sessionForThreadId(notification.params.thread.id)
+      if (!context) return
+      this.bindSessionThread(context, notification.params.thread.id)
       if (context.pendingTurn) {
         context.pendingTurn.queue.push({
           type: "session_token",
@@ -1406,6 +2140,38 @@ export class CodexAppServerManager {
       }
       return
     }
+
+    if (notification.method === "warning" && !notification.params.threadId) {
+      for (const context of this.sessions.values()) {
+        context.pendingTurn?.queue.push({
+          type: "transcript",
+          entry: timestamped({ kind: "status", status: notification.params.message }),
+        })
+      }
+      return
+    }
+
+    const context = this.sessionForThreadId(params.threadId)
+      ?? this.sessionForTurnId(params.turnId)
+
+    if (notification.method === "error") {
+      const targets = context
+        ? [context]
+        : [...this.sessions.values()].filter((session) => session.pendingTurn)
+      for (const target of targets) {
+        if (notification.params.willRetry) {
+          target.pendingTurn?.queue.push({
+            type: "transcript",
+            entry: timestamped({ kind: "status", status: notification.params.error.message }),
+          })
+        } else {
+          this.failSession(target, notification.params.error.message)
+        }
+      }
+      return
+    }
+
+    if (!context) return
 
     const pendingTurn = context.pendingTurn
     if (!pendingTurn) return
@@ -1429,6 +2195,21 @@ export class CodexAppServerManager {
       case "item/commandExecution/outputDelta":
         this.handleCommandExecutionOutputDelta(pendingTurn, notification.params)
         return
+      case "item/agentMessage/delta":
+        this.handleAgentMessageDelta(pendingTurn, notification.params)
+        return
+      case "item/reasoning/summaryTextDelta":
+        this.handleReasoningSummaryDelta(pendingTurn, notification.params)
+        return
+      case "item/mcpToolCall/progress":
+        this.handleMcpProgress(pendingTurn, notification.params)
+        return
+      case "turn/diff/updated":
+        this.handleTurnDiffUpdated(pendingTurn, notification.params)
+        return
+      case "item/fileChange/patchUpdated":
+        this.handleFileChangePatchUpdated(pendingTurn, notification.params)
+        return
       case "rawResponseItem/completed":
         this.handleRawResponseItemCompleted(pendingTurn, notification.params)
         return
@@ -1441,8 +2222,11 @@ export class CodexAppServerManager {
       case "thread/compacted":
         this.handleContextCompacted(pendingTurn, notification.params)
         return
-      case "error":
-        this.failContext(context, notification.params.error.message)
+      case "warning":
+        pendingTurn.queue.push({
+          type: "transcript",
+          entry: timestamped({ kind: "status", status: notification.params.message }),
+        })
         return
       default:
         return
@@ -1482,6 +2266,29 @@ export class CodexAppServerManager {
     }
   }
 
+  private handleTurnDiffUpdated(pendingTurn: PendingTurn, notification: TurnDiffUpdatedNotification) {
+    pendingTurn.queue.push({
+      type: "transcript",
+      entry: timestamped({
+        kind: "turn_diff",
+        turnId: notification.turnId,
+        diff: notification.diff,
+      }),
+    })
+  }
+
+  private handleFileChangePatchUpdated(pendingTurn: PendingTurn, notification: FileChangePatchUpdatedNotification) {
+    const item: FileChangeItem = {
+      type: "fileChange",
+      id: notification.itemId,
+      changes: notification.changes,
+      status: "inProgress",
+    }
+    for (const entry of fileChangeToToolCalls(item)) {
+      pendingTurn.queue.push({ type: "transcript", entry })
+    }
+  }
+
   private handleItemCompleted(pendingTurn: PendingTurn, notification: ItemCompletedNotification) {
     if (notification.item.type === "agentMessage") {
       pendingTurn.queue.push({
@@ -1489,6 +2296,7 @@ export class CodexAppServerManager {
         entry: timestamped({
           kind: "assistant_text",
           text: notification.item.text,
+          itemId: notification.item.id,
         }),
       })
       if (pendingTurn.pendingWebSearchResultToolId && notification.item.text.trim()) {
@@ -1565,6 +2373,47 @@ export class CodexAppServerManager {
   ) {
     const current = pendingTurn.commandOutputByItemId.get(notification.itemId) ?? ""
     pendingTurn.commandOutputByItemId.set(notification.itemId, `${current}${notification.delta}`)
+  }
+
+  private handleAgentMessageDelta(
+    pendingTurn: PendingTurn,
+    notification: AgentMessageDeltaNotification,
+  ) {
+    if (!notification.delta) return
+    pendingTurn.queue.push({
+      type: "transcript",
+      entry: timestamped({
+        kind: "assistant_text_delta",
+        itemId: notification.itemId,
+        delta: notification.delta,
+      }),
+    })
+  }
+
+  private handleReasoningSummaryDelta(
+    pendingTurn: PendingTurn,
+    notification: ReasoningSummaryTextDeltaNotification,
+  ) {
+    if (!notification.delta) return
+    pendingTurn.queue.push({
+      type: "transcript",
+      entry: timestamped({
+        kind: "reasoning_summary_delta",
+        itemId: notification.itemId,
+        delta: notification.delta,
+      }),
+    })
+  }
+
+  private handleMcpProgress(
+    pendingTurn: PendingTurn,
+    notification: McpToolCallProgressNotification,
+  ) {
+    if (!notification.message) return
+    pendingTurn.queue.push({
+      type: "transcript",
+      entry: timestamped({ kind: "status", status: notification.message }),
+    })
   }
 
   private handleRawResponseItemCompleted(
@@ -1672,7 +2521,7 @@ export class CodexAppServerManager {
     context.pendingTurn = null
   }
 
-  private failContext(context: SessionContext, message: string) {
+  private failSession(context: SessionContext, message: string) {
     const pendingTurn = context.pendingTurn
     if (pendingTurn && !pendingTurn.resolved) {
       pendingTurn.queue.push({
@@ -1688,24 +2537,48 @@ export class CodexAppServerManager {
       pendingTurn.queue.finish()
       context.pendingTurn = null
     }
+  }
 
+  private failConnection(context: ConnectionContext, message: string) {
+    if (context.closed) return
+    context.closed = true
     for (const pending of context.pendingRequests.values()) {
       pending.reject(new Error(message))
     }
     context.pendingRequests.clear()
-    context.closed = true
+    for (const [chatId, session] of [...this.sessions.entries()]) {
+      if (session.connection !== context) continue
+      this.failSession(session, message)
+      session.closed = true
+      if (session.sessionToken) {
+        this.chatIdByThreadId.delete(session.sessionToken)
+      }
+      this.sessions.delete(chatId)
+    }
+    if (this.connection === context) {
+      this.connection = null
+      this.connectionPromise = null
+    }
   }
 
-  private async sendRequest<TResult>(context: SessionContext, method: string, params: unknown): Promise<TResult> {
+  private connectionFor(context: SessionContext | ConnectionContext) {
+    return "connection" in context ? context.connection : context
+  }
+
+  private async sendRequest<TResult>(context: SessionContext | ConnectionContext, method: string, params: unknown): Promise<TResult> {
+    const connection = this.connectionFor(context)
+    if (connection.closed) {
+      throw new Error("Codex app-server connection is closed")
+    }
     const id = randomUUID()
     const promise = new Promise<TResult>((resolve, reject) => {
-      context.pendingRequests.set(id, {
+      connection.pendingRequests.set(id, {
         method,
         resolve: resolve as (value: unknown) => void,
         reject,
       })
     })
-    this.writeMessage(context, {
+    this.writeMessage(connection, {
       id,
       method,
       params,
@@ -1713,7 +2586,20 @@ export class CodexAppServerManager {
     return await promise
   }
 
-  private writeMessage(context: SessionContext, message: Record<string, unknown>) {
-    context.child.stdin.write(`${JSON.stringify(message)}\n`)
+  private writeMessage(context: SessionContext | ConnectionContext, message: Record<string, unknown>) {
+    const connection = this.connectionFor(context)
+    connection.child.stdin.write(`${JSON.stringify(message)}\n`)
   }
+}
+
+let processSharedCodexAppServerManager: CodexAppServerManager | null = null
+
+/**
+ * Returns the single Codex app-server manager owned by this Kanna process.
+ * Explicitly constructed managers remain available for isolated tests and
+ * embedding, while normal runtime consumers share one subprocess connection.
+ */
+export function getProcessSharedCodexAppServerManager() {
+  processSharedCodexAppServerManager ??= new CodexAppServerManager()
+  return processSharedCodexAppServerManager
 }

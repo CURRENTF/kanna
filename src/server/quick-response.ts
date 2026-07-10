@@ -3,7 +3,7 @@ import { homedir } from "node:os"
 import OpenAI from "openai"
 import { getDataRootDir } from "../shared/branding"
 import type { LlmProviderSnapshot } from "../shared/types"
-import { CodexAppServerManager } from "./codex-app-server"
+import { CodexAppServerManager, getProcessSharedCodexAppServerManager } from "./codex-app-server"
 import { readLlmProviderSnapshot } from "./llm-provider"
 
 const CLAUDE_STRUCTURED_TIMEOUT_MS = 5_000
@@ -190,7 +190,7 @@ export class QuickResponseAdapter {
   private readonly runCodexStructured: (args: Omit<StructuredQuickResponseArgs<unknown>, "parse">) => Promise<unknown | null>
 
   constructor(args: QuickResponseAdapterArgs = {}) {
-    this.codexManager = args.codexManager ?? new CodexAppServerManager()
+    this.codexManager = args.codexManager ?? getProcessSharedCodexAppServerManager()
     this.readLlmProvider = args.readLlmProvider ?? (() => readLlmProviderSnapshot())
     this.runOpenAIStructured = args.runOpenAIStructured ?? runOpenAIStructured
     this.runClaudeStructured = args.runClaudeStructured ?? runClaudeStructured

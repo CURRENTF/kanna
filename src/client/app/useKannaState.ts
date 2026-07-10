@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { useShallow } from "zustand/react/shallow"
-import { PROVIDERS, type AgentProvider, type AppSettingsPatch, type AppSettingsSnapshot, type AskUserQuestionAnswerMap, type ChatAttachment, type ChatDiffSnapshot, type ChatHistoryPage, type CodexGoal, type CodexGoalStatus, type KeybindingsSnapshot, type LlmProviderSnapshot, type LlmProviderValidationResult, type ModelOptions, type ProviderCatalogEntry, type QueuedChatMessage, type StandaloneTranscriptExportCommandResult, type TranscriptEntry, type UpdateInstallResult, type UpdateSnapshot, type UserPromptEntry } from "../../shared/types"
+import { PROVIDERS, type AgentProvider, type AppSettingsPatch, type AppSettingsSnapshot, type AskUserQuestionAnswerMap, type ChatAttachment, type ChatDiffSnapshot, type ChatHistoryPage, type CodexGoal, type CodexGoalStatus, type CodexReviewTarget, type KeybindingsSnapshot, type LlmProviderSnapshot, type LlmProviderValidationResult, type ModelOptions, type ProviderCatalogEntry, type QueuedChatMessage, type StandaloneTranscriptExportCommandResult, type TranscriptEntry, type UpdateInstallResult, type UpdateSnapshot, type UserPromptEntry, type WorktreeInfo } from "../../shared/types"
 import { NEW_CHAT_COMPOSER_ID, type ComposerState, useChatPreferencesStore } from "../stores/chatPreferencesStore"
 import { useRightSidebarStore } from "../stores/rightSidebarStore"
 import { useTerminalLayoutStore } from "../stores/terminalLayoutStore"
@@ -506,6 +506,8 @@ function composerStateFromSendOptions(options?: {
       modelOptions: {
         reasoningEffort: options.modelOptions.codex.reasoningEffort ?? "high",
         fastMode: options.modelOptions.codex.fastMode ?? false,
+        sandboxMode: options.modelOptions.codex.sandboxMode ?? "workspace-write",
+        approvalPolicy: options.modelOptions.codex.approvalPolicy ?? "on-request",
       },
       planMode: Boolean(options.planMode),
     }
@@ -683,6 +685,7 @@ export interface KannaState {
   standaloneShareUrl: string | null
   standaloneShareComplete: boolean
   navbarLocalPath?: string
+  activeWorktree: WorktreeInfo | null
   editorLabel: string
   hasSelectedProject: boolean
   addProjectModalOpen: boolean
@@ -695,6 +698,12 @@ export interface KannaState {
   loadOlderHistory: () => Promise<void>
   handleCreateChat: (projectId: string) => Promise<void>
   handleForkChat: (chat: SidebarChatRow) => Promise<void>
+  handleCreateWorktree: () => Promise<void>
+  handleHandoffToLocal: () => Promise<void>
+  handleRemoveWorktree: () => Promise<void>
+  handleStartReview: (target?: CodexReviewTarget) => Promise<void>
+  handleOpenSubagent: (threadId: string) => Promise<void>
+  handleStopSubagent: (threadId: string) => Promise<void>
   handleOpenLocalProject: (localPath: string) => Promise<void>
   handleCreateProject: (project: ProjectRequest) => Promise<void>
   handleCheckForUpdates: (options?: { force?: boolean }) => Promise<void>
@@ -711,6 +720,8 @@ export interface KannaState {
   handleClearCodexGoal: () => Promise<void>
   handleSteerQueuedMessage: (queuedMessageId: string) => Promise<void>
   handleRemoveQueuedMessage: (queuedMessageId: string) => Promise<void>
+  handleUpdateQueuedMessage: (queuedMessageId: string, content: string) => Promise<void>
+  handleReorderQueuedMessages: (queuedMessageIds: string[]) => Promise<void>
   handleCancel: () => Promise<void>
   handleStopDraining: () => Promise<void>
   handleRenameChat: (chat: SidebarChatRow) => Promise<void>
@@ -1285,6 +1296,8 @@ export function useKannaState(activeChatId: string | null): KannaState {
     runtime?.localPath
     ?? fallbackLocalProjectPath
     ?? sidebarProjectGroups[0]?.localPath
+  const activeProjectGroup = sidebarProjectGroups.find((group) => group.groupKey === activeProjectId)
+  const activeWorktree = activeProjectGroup?.worktree ?? null
   const hasSelectedProject = Boolean(
     selectedProjectId
     ?? runtime?.projectId
@@ -1488,6 +1501,108 @@ export function useKannaState(activeChatId: string | null): KannaState {
       setCommandError(error instanceof Error ? error.message : String(error))
     }
   }, [navigate, socket])
+
+  const openForkedChat = useCallback((chatId: string, sourceChatId: string) => {
+    const chatPreferences = useChatPreferencesStore.getState()
+    chatPreferences.initializeComposerForChat(chatId, {
+      sourceState: chatPreferences.getComposerState(sourceChatId),
+    })
+    setPendingChatId(chatId)
+    navigate(`/chat/${chatId}`)
+    setSidebarOpen(false)
+  }, [navigate])
+
+  const handleCreateWorktree = useCallback(async () => {
+    if (!activeChatId) return
+    try {
+      const result = await socket.command<{ chatId: string }>({
+        type: "chat.createWorktree",
+        chatId: activeChatId,
+      })
+      openForkedChat(result.chatId, activeChatId)
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+    }
+  }, [activeChatId, openForkedChat, socket])
+
+  const handleHandoffToLocal = useCallback(async () => {
+    if (!activeChatId) return
+    try {
+      const result = await socket.command<{ chatId: string }>({
+        type: "chat.handoffToLocal",
+        chatId: activeChatId,
+      })
+      openForkedChat(result.chatId, activeChatId)
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+    }
+  }, [activeChatId, openForkedChat, socket])
+
+  const handleRemoveWorktree = useCallback(async () => {
+    if (!activeProjectId || !activeWorktree) return
+    try {
+      const result = await socket.command<{ baseProjectId: string }>({
+        type: "project.removeWorktree",
+        projectId: activeProjectId,
+      })
+      const baseGroup = sidebarProjectGroups.find((group) => group.groupKey === result.baseProjectId)
+      const nextChatId = baseGroup?.previewChats[0]?.chatId ?? baseGroup?.olderChats[0]?.chatId
+      navigate(nextChatId ? `/chat/${nextChatId}` : "/")
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+    }
+  }, [activeProjectId, activeWorktree, navigate, sidebarProjectGroups, socket])
+
+  const handleStartReview = useCallback(async (target: CodexReviewTarget = { type: "uncommittedChanges" }) => {
+    if (!activeChatId) return
+    const composer = useChatPreferencesStore.getState().getComposerState(activeChatId)
+    try {
+      await socket.command({
+        type: "chat.review",
+        chatId: activeChatId,
+        target,
+        ...(composer.provider === "codex"
+          ? { model: composer.model, modelOptions: { codex: composer.modelOptions } }
+          : {}),
+      })
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+    }
+  }, [activeChatId, socket])
+
+  const handleOpenSubagent = useCallback(async (threadId: string) => {
+    if (!activeChatId) return
+    try {
+      const result = await socket.command<{ chatId: string }>({
+        type: "chat.openSubagent",
+        chatId: activeChatId,
+        threadId,
+      })
+      setPendingChatId(result.chatId)
+      navigate(`/chat/${result.chatId}`)
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+    }
+  }, [activeChatId, navigate, socket])
+
+  const handleStopSubagent = useCallback(async (threadId: string) => {
+    if (!activeChatId) return
+    try {
+      await socket.command({
+        type: "chat.stopSubagent",
+        chatId: activeChatId,
+        threadId,
+      })
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+    }
+  }, [activeChatId, socket])
 
   const handleOpenLocalProject = useCallback(async (localPath: string) => {
     await startChatFromIntent({ kind: "local_path", localPath })
@@ -1774,6 +1889,37 @@ export function useKannaState(activeChatId: string | null): KannaState {
       setCommandError(null)
     } catch (error) {
       setCommandError(error instanceof Error ? error.message : String(error))
+    }
+  }, [activeChatId, socket])
+
+  const handleUpdateQueuedMessage = useCallback(async (queuedMessageId: string, content: string) => {
+    if (!activeChatId) return
+    try {
+      await socket.command({
+        type: "message.updateQueued",
+        chatId: activeChatId,
+        queuedMessageId,
+        content,
+      })
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+      throw error
+    }
+  }, [activeChatId, socket])
+
+  const handleReorderQueuedMessages = useCallback(async (queuedMessageIds: string[]) => {
+    if (!activeChatId) return
+    try {
+      await socket.command({
+        type: "message.reorderQueued",
+        chatId: activeChatId,
+        queuedMessageIds,
+      })
+      setCommandError(null)
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : String(error))
+      throw error
     }
   }, [activeChatId, socket])
 
@@ -2159,6 +2305,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
     standaloneShareUrl,
     standaloneShareComplete,
     navbarLocalPath,
+    activeWorktree,
     editorLabel,
     hasSelectedProject,
     addProjectModalOpen,
@@ -2171,6 +2318,12 @@ export function useKannaState(activeChatId: string | null): KannaState {
     loadOlderHistory,
     handleCreateChat,
     handleForkChat,
+    handleCreateWorktree,
+    handleHandoffToLocal,
+    handleRemoveWorktree,
+    handleStartReview,
+    handleOpenSubagent,
+    handleStopSubagent,
     handleOpenLocalProject,
     handleCreateProject,
     handleCheckForUpdates,
@@ -2187,6 +2340,8 @@ export function useKannaState(activeChatId: string | null): KannaState {
     handleClearCodexGoal,
     handleSteerQueuedMessage,
     handleRemoveQueuedMessage,
+    handleUpdateQueuedMessage,
+    handleReorderQueuedMessages,
     handleCancel,
     handleStopDraining,
     handleRenameChat,

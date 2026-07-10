@@ -1,5 +1,5 @@
 import { type MouseEvent as ReactMouseEvent } from "react"
-import { Check, Flower, GitBranch, Globe, Loader2, Menu, MoreHorizontal, PanelLeft, PanelRight, SquarePen, Terminal, UserRoundPlus } from "lucide-react"
+import { Check, Flower, GitBranch, GitFork, Globe, House, Loader2, Menu, MoreHorizontal, PanelLeft, PanelRight, ScanSearch, SquarePen, Terminal, Trash2, UserRoundPlus } from "lucide-react"
 import type { EditorOpenSettings, EditorPreset, OpenExternalAction } from "../../../shared/protocol"
 import { Button } from "../ui/button"
 import { CardHeader } from "../ui/card"
@@ -28,6 +28,10 @@ function NavbarOverflowMenu({
   canExportTranscript,
   isExportingTranscript,
   exportTranscriptComplete,
+  onCreateWorktree,
+  onHandoffToLocal,
+  onRemoveWorktree,
+  onStartReview,
 }: {
   showOnDesktop: boolean
   onToggleEmbeddedTerminal?: () => void
@@ -35,8 +39,12 @@ function NavbarOverflowMenu({
   canExportTranscript: boolean
   isExportingTranscript: boolean
   exportTranscriptComplete: boolean
+  onCreateWorktree?: () => void
+  onHandoffToLocal?: () => void
+  onRemoveWorktree?: () => void
+  onStartReview?: () => void
 }) {
-  if (!onToggleEmbeddedTerminal && !onExportTranscript) return null
+  if (!onToggleEmbeddedTerminal && !onExportTranscript && !onCreateWorktree && !onHandoffToLocal && !onRemoveWorktree && !onStartReview) return null
 
   return (
     <ContextMenu>
@@ -85,6 +93,42 @@ function NavbarOverflowMenu({
             <span className="text-xs font-medium">Share Chat</span>
           </ContextMenuItem>
         ) : null}
+        {onCreateWorktree ? (
+          <ContextMenuItem onSelect={(event) => {
+            event.preventDefault()
+            onCreateWorktree()
+          }}>
+            <GitFork className="h-3.5 w-3.5" />
+            <span className="text-xs font-medium">Create worktree handoff</span>
+          </ContextMenuItem>
+        ) : null}
+        {onStartReview ? (
+          <ContextMenuItem onSelect={(event) => {
+            event.preventDefault()
+            onStartReview()
+          }}>
+            <ScanSearch className="h-3.5 w-3.5" />
+            <span className="text-xs font-medium">Review uncommitted changes</span>
+          </ContextMenuItem>
+        ) : null}
+        {onHandoffToLocal ? (
+          <ContextMenuItem onSelect={(event) => {
+            event.preventDefault()
+            onHandoffToLocal()
+          }}>
+            <House className="h-3.5 w-3.5" />
+            <span className="text-xs font-medium">Hand off to local</span>
+          </ContextMenuItem>
+        ) : null}
+        {onRemoveWorktree ? (
+          <ContextMenuItem onSelect={(event) => {
+            event.preventDefault()
+            onRemoveWorktree()
+          }}>
+            <Trash2 className="h-3.5 w-3.5" />
+            <span className="text-xs font-medium">Remove clean worktree</span>
+          </ContextMenuItem>
+        ) : null}
       </ContextMenuContent>
     </ContextMenu>
   )
@@ -116,6 +160,10 @@ interface Props {
   branchName?: string
   hasGitRepo?: boolean
   gitStatus?: "unknown" | "ready" | "no_repo"
+  onCreateWorktree?: () => void
+  onHandoffToLocal?: () => void
+  onRemoveWorktree?: () => void
+  onStartReview?: () => void
 }
 
 export function ChatNavbar({
@@ -144,6 +192,10 @@ export function ChatNavbar({
   branchName,
   hasGitRepo = true,
   gitStatus = "unknown",
+  onCreateWorktree,
+  onHandoffToLocal,
+  onRemoveWorktree,
+  onStartReview,
 }: Props) {
   const branchLabel = !hasGitRepo
     ? "Setup Git"
@@ -226,6 +278,10 @@ export function ChatNavbar({
                   canExportTranscript={canExportTranscript}
                   isExportingTranscript={isExportingTranscript}
                   exportTranscriptComplete={exportTranscriptComplete}
+                  onCreateWorktree={onCreateWorktree}
+                  onHandoffToLocal={onHandoffToLocal}
+                  onRemoveWorktree={onRemoveWorktree}
+                  onStartReview={onStartReview}
                 />
                 {onToggleEmbeddedTerminal ? (
                 <HotkeyTooltip>

@@ -3,7 +3,7 @@ import { existsSync, readFileSync as readFileSyncImmediate } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { getDataDir, LOG_PREFIX } from "../shared/branding"
-import type { AgentProvider, ChatHistoryPage, ChatHistorySnapshot, QueuedChatMessage, TranscriptEntry } from "../shared/types"
+import type { AgentProvider, ChatHistoryPage, ChatHistorySnapshot, ProjectSummary, QueuedChatMessage, TranscriptEntry } from "../shared/types"
 import { STORE_VERSION } from "../shared/types"
 import {
   type ChatEvent,
@@ -81,6 +81,7 @@ function getReplayEventPriority(event: StoreEvent) {
     case "project_removed":
       return 0
     case "chat_created":
+    case "codex_thread_imported":
       return 1
     case "chat_renamed":
     case "chat_provider_set":
@@ -90,6 +91,8 @@ function getReplayEventPriority(event: StoreEvent) {
       return 3
     case "queued_message_enqueued":
     case "queued_message_removed":
+    case "queued_message_updated":
+    case "queued_messages_reordered":
       return 4
     case "turn_started":
       return 5
@@ -431,6 +434,7 @@ export class EventStore {
           title: event.title,
           createdAt: event.timestamp,
           updatedAt: event.timestamp,
+          ...(event.worktree ? { worktree: { ...event.worktree } } : {}),
         }
         this.state.projectsById.set(project.id, project)
         this.state.projectIdsByPath.set(localPath, project.id)
@@ -456,7 +460,7 @@ export class EventStore {
         break
       }
       case "chat_created": {
-      const chat = {
+        const chat = {
           id: event.chatId,
           projectId: event.projectId,
           title: event.title,
@@ -471,6 +475,26 @@ export class EventStore {
           lastTurnOutcome: null,
         }
         this.state.chatsById.set(chat.id, chat)
+        break
+      }
+      case "codex_thread_imported": {
+        const existing = this.state.chatsById.get(event.chatId)
+        this.state.chatsById.set(event.chatId, {
+          id: event.chatId,
+          projectId: event.projectId,
+          title: event.title,
+          createdAt: existing?.createdAt ?? event.createdAt,
+          updatedAt: event.updatedAt,
+          ...(event.archived ? { archivedAt: event.updatedAt } : {}),
+          unread: existing?.unread ?? false,
+          provider: "codex",
+          planMode: existing?.planMode ?? false,
+          sessionToken: event.sessionToken,
+          pendingForkSessionToken: null,
+          hasMessages: existing?.hasMessages || event.hasMessages,
+          lastMessageAt: event.hasMessages ? event.updatedAt : existing?.lastMessageAt,
+          lastTurnOutcome: event.lastTurnOutcome,
+        })
         break
       }
       case "chat_renamed": {
@@ -550,6 +574,37 @@ export class EventStore {
           this.state.queuedMessagesByChatId.set(event.chatId, next)
         } else {
           this.state.queuedMessagesByChatId.delete(event.chatId)
+        }
+        const chat = this.state.chatsById.get(event.chatId)
+        if (chat) {
+          chat.updatedAt = event.timestamp
+        }
+        break
+      }
+      case "queued_message_updated": {
+        const existing = this.state.queuedMessagesByChatId.get(event.chatId) ?? []
+        const queuedMessage = existing.find((entry) => entry.id === event.queuedMessageId)
+        if (queuedMessage) {
+          queuedMessage.content = event.content
+        }
+        const chat = this.state.chatsById.get(event.chatId)
+        if (chat) {
+          chat.updatedAt = event.timestamp
+        }
+        break
+      }
+      case "queued_messages_reordered": {
+        const existing = this.state.queuedMessagesByChatId.get(event.chatId) ?? []
+        const byId = new Map(existing.map((entry) => [entry.id, entry]))
+        const reordered = event.queuedMessageIds.flatMap((id) => {
+          const entry = byId.get(id)
+          return entry ? [entry] : []
+        })
+        for (const entry of existing) {
+          if (!event.queuedMessageIds.includes(entry.id)) reordered.push(entry)
+        }
+        if (reordered.length > 0) {
+          this.state.queuedMessagesByChatId.set(event.chatId, reordered)
         }
         const chat = this.state.chatsById.get(event.chatId)
         if (chat) {
@@ -644,7 +699,7 @@ export class EventStore {
     return entries
   }
 
-  async openProject(localPath: string, title?: string) {
+  async openProject(localPath: string, title?: string, worktree?: ProjectSummary["worktree"]) {
     const normalized = resolveLocalPath(localPath)
     const existingId = this.state.projectIdsByPath.get(normalized)
     if (existingId) {
@@ -664,6 +719,7 @@ export class EventStore {
       projectId,
       localPath: normalized,
       title: title?.trim() || path.basename(normalized) || normalized,
+      ...(worktree ? { worktree: { ...worktree } } : {}),
     }
     await this.append(this.projectsLogPath, event)
     return this.state.projectsById.get(projectId)!
@@ -743,11 +799,69 @@ export class EventStore {
     return this.state.chatsById.get(chatId)!
   }
 
-  async forkChat(sourceChatId: string) {
+  getChatBySessionToken(sessionToken: string) {
+    return [...this.state.chatsById.values()].find((chat) => chat.sessionToken === sessionToken && !chat.deletedAt) ?? null
+  }
+
+  async importCodexThread(args: {
+    projectId: string
+    threadId: string
+    title: string
+    createdAt: number
+    updatedAt: number
+    archived: boolean
+    transcript: TranscriptEntry[]
+    lastTurnOutcome: "success" | "failed" | "cancelled" | null
+  }) {
+    const project = this.state.projectsById.get(args.projectId)
+    if (!project || project.deletedAt) {
+      throw new Error("Project not found")
+    }
+
+    const existing = this.getChatBySessionToken(args.threadId)
+    const chatId = existing?.id ?? `codex-${args.threadId}`
+    const shouldImportTranscript = !existing?.hasMessages && args.transcript.length > 0
+    const event: ChatEvent = {
+      v: STORE_VERSION,
+      type: "codex_thread_imported",
+      timestamp: Date.now(),
+      chatId,
+      projectId: args.projectId,
+      title: args.title,
+      createdAt: args.createdAt,
+      updatedAt: args.updatedAt,
+      sessionToken: args.threadId,
+      archived: args.archived,
+      hasMessages: shouldImportTranscript || Boolean(existing?.hasMessages),
+      lastTurnOutcome: args.lastTurnOutcome,
+    }
+    await this.append(this.chatsLogPath, event)
+
+    if (shouldImportTranscript) {
+      const transcriptPath = this.transcriptPath(chatId)
+      const payload = args.transcript.map((entry) => JSON.stringify(entry)).join("\n")
+      this.writeChain = this.writeChain.then(async () => {
+        await mkdir(this.transcriptsDir, { recursive: true })
+        await writeFile(transcriptPath, `${payload}\n`, "utf8")
+        if (this.cachedTranscript?.chatId === chatId) {
+          this.cachedTranscript = { chatId, entries: cloneTranscriptEntries(args.transcript) }
+        }
+      })
+      await this.writeChain
+    }
+
+    return this.state.chatsById.get(chatId)!
+  }
+
+  async forkChat(sourceChatId: string, targetProjectId = this.requireChat(sourceChatId).projectId) {
     const sourceChat = this.requireChat(sourceChatId)
     const sourceSessionToken = sourceChat.sessionToken ?? sourceChat.pendingForkSessionToken ?? null
     if (!sourceChat.provider || !sourceSessionToken) {
       throw new Error("Chat cannot be forked")
+    }
+    const targetProject = this.state.projectsById.get(targetProjectId)
+    if (!targetProject || targetProject.deletedAt) {
+      throw new Error("Target project not found")
     }
 
     const chatId = crypto.randomUUID()
@@ -757,7 +871,7 @@ export class EventStore {
       type: "chat_created",
       timestamp: createdAt,
       chatId,
-      projectId: sourceChat.projectId,
+      projectId: targetProjectId,
       title: getForkedChatTitle(sourceChat.title),
     }
     await this.append(this.chatsLogPath, createEvent)
@@ -983,6 +1097,47 @@ export class EventStore {
       queuedMessageId,
     }
     await this.append(this.queuedMessagesLogPath, event)
+  }
+
+  async updateQueuedMessage(chatId: string, queuedMessageId: string, content: string) {
+    this.requireChat(chatId)
+    const queuedMessage = this.getQueuedMessage(chatId, queuedMessageId)
+    if (!queuedMessage) {
+      throw new Error("Queued message not found")
+    }
+    const normalizedContent = content.trim()
+    if (!normalizedContent && queuedMessage.attachments.length === 0) {
+      throw new Error("Queued message cannot be empty")
+    }
+    const event: QueuedMessageEvent = {
+      v: STORE_VERSION,
+      type: "queued_message_updated",
+      timestamp: Date.now(),
+      chatId,
+      queuedMessageId,
+      content: normalizedContent,
+    }
+    await this.append(this.queuedMessagesLogPath, event)
+    return this.getQueuedMessage(chatId, queuedMessageId)!
+  }
+
+  async reorderQueuedMessages(chatId: string, queuedMessageIds: string[]) {
+    this.requireChat(chatId)
+    const existingIds = this.getQueuedMessages(chatId).map((entry) => entry.id)
+    const requestedIds = [...new Set(queuedMessageIds)]
+    if (requestedIds.length !== existingIds.length
+      || requestedIds.some((id) => !existingIds.includes(id))) {
+      throw new Error("Queued message order must include every queued message exactly once")
+    }
+    const event: QueuedMessageEvent = {
+      v: STORE_VERSION,
+      type: "queued_messages_reordered",
+      timestamp: Date.now(),
+      chatId,
+      queuedMessageIds: requestedIds,
+    }
+    await this.append(this.queuedMessagesLogPath, event)
+    return this.getQueuedMessages(chatId)
   }
 
   async recordTurnStarted(chatId: string) {

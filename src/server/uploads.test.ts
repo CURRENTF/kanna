@@ -21,7 +21,7 @@ async function startIsolatedServer(options: { port: number; strictPort?: boolean
   return startKannaServer({
     dataDir,
     port: options.port,
-    strictPort: options.strictPort ?? true,
+    strictPort: options.strictPort ?? false,
   })
 }
 

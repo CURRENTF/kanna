@@ -44,6 +44,13 @@ export function shouldRetryAuthStatusRequest(responseOk: boolean | null) {
   return responseOk !== true
 }
 
+export function getLoginErrorMessage(status: number) {
+  if (status === 429) {
+    return "Too many login attempts. Try again in one minute."
+  }
+  return "Incorrect password. Try again."
+}
+
 function PasswordScreen({
   error,
   onSubmit,
@@ -170,7 +177,7 @@ function useAppAuthState() {
     })
 
     if (!response.ok) {
-      setState({ status: "locked", error: "Incorrect password. Try again." })
+      setState({ status: "locked", error: getLoginErrorMessage(response.status) })
       return
     }
 

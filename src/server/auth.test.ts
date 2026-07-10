@@ -24,7 +24,7 @@ async function startPasswordServer(options: { trustProxy?: boolean; port?: numbe
     trustProxy: options.trustProxy ?? false,
   })
   const project = await server.store.openProject(projectDir, "Project")
-  return { server, projectDir, project }
+  return { server, projectDir, dataDir, project }
 }
 
 function extractCookie(response: Response) {
@@ -34,6 +34,42 @@ function extractCookie(response: Response) {
 }
 
 describe("password auth", () => {
+  test("generates and enforces a password for non-loopback listeners", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "kanna-remote-auth-data-"))
+    tempDirs.push(dataDir)
+    const progress: string[] = []
+    const server = await startKannaServer({
+      dataDir,
+      host: "0.0.0.0",
+      port: 54324,
+      strictPort: false,
+      password: "",
+      onMigrationProgress: (message) => progress.push(message),
+    })
+
+    try {
+      expect(server.launchPassword).toBeTruthy()
+      expect(server.launchPassword).not.toBe("secret")
+      expect(progress.some((message) => message.includes("generated one-time launch password"))).toBe(true)
+
+      const status = await fetch(`http://127.0.0.1:${server.port}/auth/status`)
+      expect(await status.json()).toEqual({ enabled: true, authenticated: false })
+
+      const login = await fetch(`http://127.0.0.1:${server.port}/auth/login`, {
+        method: "POST",
+        body: JSON.stringify({ password: server.launchPassword, next: "/" }),
+        headers: {
+          "Content-Type": "application/json",
+          Origin: `http://127.0.0.1:${server.port}`,
+        },
+      })
+      expect(login.status).toBe(200)
+      expect(extractCookie(login)).toContain("kanna_session=")
+    } finally {
+      await server.stop()
+    }
+  })
+
   test("serves the app shell to unauthenticated browser requests", async () => {
     const { server } = await startPasswordServer()
 
@@ -102,6 +138,39 @@ describe("password auth", () => {
     }
   })
 
+  test("keeps authenticated sessions valid across server restarts", async () => {
+    const { server, dataDir } = await startPasswordServer()
+    let restartedServer: Awaited<ReturnType<typeof startKannaServer>> | null = null
+
+    try {
+      const loginResponse = await fetch(`http://localhost:${server.port}/auth/login`, {
+        method: "POST",
+        body: JSON.stringify({ password: "secret", next: "/" }),
+        headers: {
+          "Content-Type": "application/json",
+          Origin: `http://localhost:${server.port}`,
+        },
+      })
+      const cookie = extractCookie(loginResponse)
+
+      await server.stop()
+      restartedServer = await startKannaServer({
+        dataDir,
+        port: server.port,
+        strictPort: true,
+        password: "secret",
+      })
+
+      const statusResponse = await fetch(`http://localhost:${restartedServer.port}/auth/status`, {
+        headers: { Cookie: cookie },
+      })
+      expect(statusResponse.status).toBe(200)
+      expect(await statusResponse.json()).toEqual({ enabled: true, authenticated: true })
+    } finally {
+      await restartedServer?.stop()
+    }
+  })
+
   test("rejects an invalid password", async () => {
     const { server } = await startPasswordServer()
 
@@ -117,6 +186,30 @@ describe("password auth", () => {
 
       expect(response.status).toBe(401)
       expect(response.headers.get("set-cookie")).toBeNull()
+    } finally {
+      await server.stop()
+    }
+  })
+
+  test("rate limits repeated invalid login attempts", async () => {
+    const { server } = await startPasswordServer()
+
+    try {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const response = await fetch(`http://localhost:${server.port}/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password: "wrong" }),
+        })
+        expect(response.status).toBe(401)
+      }
+      const limited = await fetch(`http://localhost:${server.port}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "wrong" }),
+      })
+      expect(limited.status).toBe(429)
+      expect(limited.headers.get("retry-after")).toBe("60")
     } finally {
       await server.stop()
     }

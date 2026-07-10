@@ -3,7 +3,10 @@ import { homedir } from "node:os"
 import type {
   AgentProvider,
   ChatAttachment,
+  CodexApprovalPolicy,
   CodexGoalStatus,
+  CodexReviewTarget,
+  CodexSandboxMode,
   ContextWindowUsageSnapshot,
   ModelOptions,
   NormalizedToolCall,
@@ -17,11 +20,16 @@ import type { ClientCommand } from "../shared/protocol"
 import { EventStore } from "./event-store"
 import type { AnalyticsReporter } from "./analytics"
 import { NoopAnalyticsReporter } from "./analytics"
-import { CodexAppServerManager } from "./codex-app-server"
+import {
+  CodexAppServerManager,
+  getProcessSharedCodexAppServerManager,
+  transcriptFromCodexThread,
+} from "./codex-app-server"
 import { type GenerateChatTitleResult, generateTitleForChatDetailed } from "./generate-title"
 import type { HarnessEvent, HarnessToolRequest, HarnessTurn } from "./harness-types"
 import {
   applyClaudeSdkModels,
+  applyCodexAppServerModels,
   type ClaudeSdkModelInfo,
   codexServiceTierFromModelOptions,
   getServerProviderCatalog,
@@ -66,6 +74,8 @@ interface ActiveTurn {
   effort?: string
   serviceTier?: "fast"
   planMode: boolean
+  approvalPolicy?: CodexApprovalPolicy
+  sandboxMode?: CodexSandboxMode
   status: KannaStatus
   pendingTool: PendingToolRequest | null
   postToolFollowUp: { content: string; planMode: boolean } | null
@@ -692,13 +702,181 @@ export class AgentCoordinator {
     this.store = args.store
     this.onStateChange = args.onStateChange
     this.analytics = args.analytics ?? NoopAnalyticsReporter
-    this.codexManager = args.codexManager ?? new CodexAppServerManager()
+    this.codexManager = args.codexManager ?? getProcessSharedCodexAppServerManager()
     this.generateTitle = args.generateTitle ?? generateTitleForChatDetailed
     this.startClaudeSessionFn = args.startClaudeSession ?? startClaudeSession
   }
 
   setBackgroundErrorReporter(report: ((message: string) => void) | null) {
     this.reportBackgroundError = report
+  }
+
+  async syncCodexThreads(projects: Array<{ id: string; localPath: string }>) {
+    let imported = 0
+    const errors: string[] = []
+
+    for (const project of projects) {
+      try {
+        const [activeThreads, archivedThreads] = await Promise.all([
+          this.codexManager.listThreads(project.localPath, false),
+          this.codexManager.listThreads(project.localPath, true),
+        ])
+        const summaries = [...activeThreads, ...archivedThreads]
+          .filter((thread) => !this.store.getChatBySessionToken(thread.id))
+        if (summaries.length === 0) continue
+        const hydrated = await this.codexManager.readThreads(
+          project.localPath,
+          summaries.map((thread) => thread.id)
+        )
+        const hydratedById = new Map(hydrated.map((thread) => [thread.id, thread]))
+
+        for (const summary of summaries) {
+          const thread = hydratedById.get(summary.id) ?? summary
+          const lastTurn = thread.turns.at(-1)
+          const lastTurnOutcome = lastTurn?.status === "failed"
+            ? "failed"
+            : lastTurn?.status === "interrupted"
+              ? "cancelled"
+              : lastTurn?.status === "completed"
+                ? "success"
+                : null
+          await this.store.importCodexThread({
+            projectId: project.id,
+            threadId: thread.id,
+            title: thread.name?.trim() || thread.preview.trim().slice(0, 100) || "Codex task",
+            createdAt: thread.createdAt * 1_000,
+            updatedAt: thread.updatedAt * 1_000,
+            archived: Boolean(summary.archived),
+            transcript: thread.turns.length ? transcriptFromCodexThread(thread) : [],
+            lastTurnOutcome,
+          })
+          imported += 1
+        }
+      } catch (error) {
+        errors.push(`${project.localPath}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
+    return { imported, errors }
+  }
+
+  async refreshCodexModelCatalog(cwd: string) {
+    const models = await this.codexManager.listModels(cwd)
+    return applyCodexAppServerModels(models)
+  }
+
+  readCodexManagement(cwd: string) {
+    return this.codexManager.readManagementSnapshot(cwd)
+  }
+
+  writeCodexConfig(cwd: string, keyPath: string, value: unknown) {
+    return this.codexManager.writeConfigValue(cwd, keyPath, value)
+  }
+
+  toggleCodexSkill(cwd: string, skillPath: string, enabled: boolean) {
+    return this.codexManager.toggleSkill(cwd, skillPath, enabled)
+  }
+
+  installCodexPlugin(cwd: string, params: { pluginName: string; marketplacePath?: string | null; remoteMarketplaceName?: string | null }) {
+    return this.codexManager.installPlugin(cwd, params)
+  }
+
+  uninstallCodexPlugin(cwd: string, pluginId: string) {
+    return this.codexManager.uninstallPlugin(cwd, pluginId)
+  }
+
+  addCodexMarketplace(cwd: string, source: string) {
+    return this.codexManager.addMarketplace(cwd, source)
+  }
+
+  removeCodexMarketplace(cwd: string, marketplaceName: string) {
+    return this.codexManager.removeMarketplace(cwd, marketplaceName)
+  }
+
+  upgradeCodexMarketplaces(cwd: string, marketplaceName?: string | null) {
+    return this.codexManager.upgradeMarketplaces(cwd, marketplaceName)
+  }
+
+  startCodexMcpOauth(cwd: string, name: string) {
+    return this.codexManager.startMcpOauth(cwd, name)
+  }
+
+  reloadCodexMcp(cwd: string) {
+    return this.codexManager.reloadMcp(cwd)
+  }
+
+  async openSubagentThread(chatId: string, threadId: string) {
+    const parent = this.store.requireChat(chatId)
+    const project = this.store.getProject(parent.projectId)
+    if (!project) throw new Error("Project not found")
+    const thread = await this.codexManager.readThread(project.localPath, threadId)
+    const lastTurn = thread.turns.at(-1)
+    const imported = await this.store.importCodexThread({
+      projectId: project.id,
+      threadId: thread.id,
+      title: thread.name?.trim() || thread.preview.trim().slice(0, 100) || "Codex subagent",
+      createdAt: thread.createdAt * 1_000,
+      updatedAt: thread.updatedAt * 1_000,
+      archived: Boolean(thread.archived),
+      transcript: transcriptFromCodexThread(thread),
+      lastTurnOutcome: lastTurn?.status === "failed"
+        ? "failed"
+        : lastTurn?.status === "interrupted"
+          ? "cancelled"
+          : lastTurn?.status === "completed"
+            ? "success"
+            : null,
+    })
+    this.emitStateChange(imported.id)
+    return { chatId: imported.id }
+  }
+
+  async stopSubagentThread(chatId: string, threadId: string) {
+    const parent = this.store.requireChat(chatId)
+    const project = this.store.getProject(parent.projectId)
+    if (!project) throw new Error("Project not found")
+    return { interrupted: await this.codexManager.interruptThread(project.localPath, threadId) }
+  }
+
+  private codexThreadTarget(chatId: string) {
+    const chat = this.store.requireChat(chatId)
+    const project = this.store.getProject(chat.projectId)
+    if (!project) throw new Error("Project not found")
+    return { chat, project, threadId: chat.sessionToken }
+  }
+
+  async renameChat(chatId: string, title: string) {
+    const { chat, project, threadId } = this.codexThreadTarget(chatId)
+    if (chat.provider === "codex" && threadId) {
+      await this.codexManager.setThreadName(chatId, project.localPath, threadId, title)
+    }
+    await this.store.renameChat(chatId, title)
+  }
+
+  async archiveChat(chatId: string) {
+    const { chat, project, threadId } = this.codexThreadTarget(chatId)
+    if (chat.provider === "codex" && threadId) {
+      await this.codexManager.archiveThread(chatId, project.localPath, threadId)
+    }
+    await this.store.archiveChat(chatId)
+  }
+
+  async unarchiveChat(chatId: string) {
+    const { chat, project, threadId } = this.codexThreadTarget(chatId)
+    if (chat.provider === "codex" && threadId) {
+      await this.codexManager.unarchiveThread(chatId, project.localPath, threadId)
+    }
+    await this.store.unarchiveChat(chatId)
+  }
+
+  async deleteChat(chatId: string) {
+    await this.cancel(chatId)
+    const { chat, project, threadId } = this.codexThreadTarget(chatId)
+    if (chat.provider === "codex" && threadId) {
+      await this.codexManager.deleteThread(chatId, project.localPath, threadId)
+    }
+    await this.closeChat(chatId)
+    await this.store.deleteChat(chatId)
   }
 
   getActiveStatuses() {
@@ -772,6 +950,8 @@ export class AgentCoordinator {
       model,
       sessionToken: chat.sessionToken,
       serviceTier: undefined,
+      approvalPolicy: "on-request",
+      sandboxMode: "workspace-write",
     })
     if (sessionToken && sessionToken !== chat.sessionToken) {
       await this.store.setSessionToken(chatId, sessionToken)
@@ -833,7 +1013,12 @@ export class AgentCoordinator {
       claudeSession.session.close()
       this.claudeSessions.delete(chatId)
     }
+    this.codexManager.stopSession(chatId)
     this.emitStateChange(chatId)
+  }
+
+  stopAllCodexSessions() {
+    this.codexManager.stopAll()
   }
 
   private resolveProvider(options: SendMessageOptions, currentProvider: AgentProvider | null) {
@@ -851,6 +1036,8 @@ export class AgentCoordinator {
         effort: modelOptions.reasoningEffort,
         serviceTier: undefined,
         planMode: catalog.supportsPlanMode ? Boolean(options.planMode) : false,
+        approvalPolicy: undefined,
+        sandboxMode: undefined,
       }
     }
 
@@ -860,6 +1047,8 @@ export class AgentCoordinator {
       effort: modelOptions.reasoningEffort,
       serviceTier: codexServiceTierFromModelOptions(modelOptions),
       planMode: catalog.supportsPlanMode ? Boolean(options.planMode) : false,
+      approvalPolicy: modelOptions.approvalPolicy,
+      sandboxMode: modelOptions.sandboxMode,
     }
   }
 
@@ -890,6 +1079,8 @@ export class AgentCoordinator {
       effort: settings.effort,
       serviceTier: settings.serviceTier,
       planMode: settings.planMode,
+      approvalPolicy: settings.approvalPolicy,
+      sandboxMode: settings.sandboxMode,
       appendUserPrompt: true,
       steered: options?.steered,
     })
@@ -914,9 +1105,12 @@ export class AgentCoordinator {
     effort?: string
     serviceTier?: "fast"
     planMode: boolean
+    approvalPolicy?: CodexApprovalPolicy
+    sandboxMode?: CodexSandboxMode
     appendUserPrompt: boolean
     steered?: boolean
     profile?: SendToStartingProfile | null
+    reviewTarget?: CodexReviewTarget
   }) {
     logSendToStartingProfile(args.profile, "start_turn.begin", {
       chatId: args.chatId,
@@ -1038,6 +1232,8 @@ export class AgentCoordinator {
         cwd: project.localPath,
         model: args.model,
         serviceTier: args.serviceTier,
+        approvalPolicy: args.approvalPolicy ?? "on-request",
+        sandboxMode: args.sandboxMode ?? "workspace-write",
         sessionToken: chat.sessionToken,
         pendingForkSessionToken: chat.pendingForkSessionToken,
       })
@@ -1049,15 +1245,24 @@ export class AgentCoordinator {
         provider: args.provider,
         model: args.model,
       })
-      turn = await this.codexManager.startTurn({
-        chatId: args.chatId,
-        content: buildPromptText(args.content, args.attachments),
-        model: args.model,
-        effort: args.effort as any,
-        serviceTier: args.serviceTier,
-        planMode: args.planMode,
-        onToolRequest,
-      })
+      turn = args.reviewTarget
+        ? await this.codexManager.startReview({
+          chatId: args.chatId,
+          model: args.model,
+          target: args.reviewTarget,
+          onToolRequest,
+        })
+        : await this.codexManager.startTurn({
+          chatId: args.chatId,
+          content: args.content,
+          attachments: args.attachments,
+          model: args.model,
+          effort: args.effort as any,
+          serviceTier: args.serviceTier,
+          planMode: args.planMode,
+          approvalPolicy: args.approvalPolicy ?? "on-request",
+          onToolRequest,
+        })
       logSendToStartingProfile(args.profile, "start_turn.provider_boot.ready", {
         chatId: args.chatId,
         provider: args.provider,
@@ -1073,6 +1278,8 @@ export class AgentCoordinator {
       effort: args.effort,
       serviceTier: args.serviceTier,
       planMode: args.planMode,
+      approvalPolicy: args.approvalPolicy,
+      sandboxMode: args.sandboxMode,
       status: args.provider === "claude" ? "running" : "starting",
       pendingTool: null,
       postToolFollowUp: null,
@@ -1254,6 +1461,8 @@ export class AgentCoordinator {
       effort: settings.effort,
       serviceTier: settings.serviceTier,
       planMode: settings.planMode,
+      approvalPolicy: settings.approvalPolicy,
+      sandboxMode: settings.sandboxMode,
       appendUserPrompt: true,
       profile,
     })
@@ -1265,6 +1474,36 @@ export class AgentCoordinator {
     })
 
     return { chatId }
+  }
+
+  async review(command: Extract<ClientCommand, { type: "chat.review" }>) {
+    const chat = this.store.requireChat(command.chatId)
+    if (chat.provider !== "codex") {
+      throw new Error("Code review is available for Codex chats")
+    }
+    const settings = this.getProviderSettings("codex", command)
+    const content = command.target.type === "uncommittedChanges"
+      ? "Review uncommitted changes"
+      : command.target.type === "baseBranch"
+        ? `Review changes against ${command.target.branch}`
+        : command.target.type === "commit"
+          ? `Review commit ${command.target.sha}`
+          : `Review: ${command.target.instructions}`
+
+    await this.startTurnForChat({
+      chatId: command.chatId,
+      provider: "codex",
+      content,
+      attachments: [],
+      model: settings.model,
+      effort: settings.effort,
+      serviceTier: settings.serviceTier,
+      planMode: false,
+      approvalPolicy: settings.approvalPolicy,
+      sandboxMode: settings.sandboxMode,
+      appendUserPrompt: true,
+      reviewTarget: command.target,
+    })
   }
 
   async enqueue(command: Extract<ClientCommand, { type: "message.enqueue" }>) {
@@ -1291,7 +1530,21 @@ export class AgentCoordinator {
       queuedMessagePreview: queuedMessage.content.slice(0, 160),
     })
 
-    if (this.activeTurns.has(command.chatId)) {
+    const active = this.activeTurns.get(command.chatId)
+    if (active?.provider === "codex") {
+      await this.store.removeQueuedMessage(command.chatId, queuedMessage.id)
+      await this.store.appendMessage(command.chatId, timestamped({
+        kind: "user_prompt",
+        content: queuedMessage.content,
+        attachments: queuedMessage.attachments,
+        steered: true,
+      }))
+      await this.codexManager.steerTurn(command.chatId, queuedMessage.content, queuedMessage.attachments)
+      this.emitStateChange(command.chatId)
+      return
+    }
+
+    if (active) {
       await this.cancel(command.chatId, { hideInterrupted: true })
     }
 
@@ -1316,7 +1569,15 @@ export class AgentCoordinator {
     await this.store.removeQueuedMessage(command.chatId, command.queuedMessageId)
   }
 
-  async forkChat(chatId: string) {
+  async updateQueued(command: Extract<ClientCommand, { type: "message.updateQueued" }>) {
+    return await this.store.updateQueuedMessage(command.chatId, command.queuedMessageId, command.content)
+  }
+
+  async reorderQueued(command: Extract<ClientCommand, { type: "message.reorderQueued" }>) {
+    return await this.store.reorderQueuedMessages(command.chatId, command.queuedMessageIds)
+  }
+
+  async forkChat(chatId: string, targetProjectId?: string) {
     const chat = this.store.requireChat(chatId)
     if (this.activeTurns.has(chatId) || this.drainingStreams.has(chatId)) {
       throw new Error("Chat must be idle before forking")
@@ -1328,9 +1589,21 @@ export class AgentCoordinator {
       throw new Error("Chat has no session to fork")
     }
 
-    const forked = await this.store.forkChat(chatId)
+    const forked = await this.store.forkChat(chatId, targetProjectId)
     this.analytics.track("chat_created")
     return { chatId: forked.id }
+  }
+
+  prepareProjectRemoval(projectId: string) {
+    const chats = [...this.store.state.chatsById.values()]
+      .filter((chat) => chat.projectId === projectId && !chat.deletedAt)
+    const busy = chats.find((chat) => this.activeTurns.has(chat.id) || this.drainingStreams.has(chat.id))
+    if (busy) {
+      throw new Error("Stop active worktree chats before removing the worktree")
+    }
+    for (const chat of chats) {
+      this.codexManager.stopSession(chat.id)
+    }
   }
 
   private async runClaudeSession(session: ClaudeSessionState) {
@@ -1436,7 +1709,7 @@ export class AgentCoordinator {
       const chat = this.store.requireChat(chatId)
       if (chat.title !== expectedCurrentTitle) return
 
-      await this.store.renameChat(chatId, result.title)
+      await this.renameChat(chatId, result.title)
       this.emitStateChange(chatId)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1533,6 +1806,8 @@ export class AgentCoordinator {
             effort: active.effort,
             serviceTier: active.serviceTier,
             planMode: active.postToolFollowUp.planMode,
+            approvalPolicy: active.approvalPolicy,
+            sandboxMode: active.sandboxMode,
             appendUserPrompt: false,
           })
         } catch (error) {

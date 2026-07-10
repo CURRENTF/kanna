@@ -48,6 +48,8 @@ function expectedSettingsSnapshot(filePath: string, overrides: Partial<AppSettin
         modelOptions: {
           reasoningEffort: "high",
           fastMode: false,
+          sandboxMode: "workspace-write",
+          approvalPolicy: "on-request",
         },
         planMode: false,
       },

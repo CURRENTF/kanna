@@ -1,6 +1,7 @@
 import path from "node:path"
+import { randomBytes } from "node:crypto"
 import { stat } from "node:fs/promises"
-import { APP_NAME, getRuntimeProfile } from "../shared/branding"
+import { APP_NAME, LOG_PREFIX, getRuntimeProfile } from "../shared/branding"
 import type { ChatAttachment } from "../shared/types"
 import type { ShareMode } from "../shared/share"
 import { createAuthManager } from "./auth"
@@ -19,10 +20,18 @@ import type { UpdateInstallAttemptResult } from "./cli-runtime"
 import { createWsRouter, type ClientState } from "./ws-router"
 import { deleteProjectUpload, inferAttachmentContentType, inferProjectFileContentType, persistProjectUpload } from "./uploads"
 import { getProjectUploadDir } from "./paths"
+import { WorktreeManager } from "./worktree-manager"
+import type { StoreState } from "./events"
 
 const MAX_UPLOAD_FILES = 50
 const MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024
 const STALE_EMPTY_CHAT_PRUNE_INTERVAL_MS = 60 * 1000
+
+export function getCodexThreadSyncProjects(state: Pick<StoreState, "projectsById">) {
+  return [...state.projectsById.values()]
+    .filter((project) => !project.deletedAt)
+    .map((project) => ({ id: project.id, localPath: project.localPath }))
+}
 
 export async function persistUploadedFiles(args: {
   projectId: string
@@ -86,8 +95,20 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
   const hostname = options.host ?? "127.0.0.1"
   const strictPort = options.strictPort ?? false
   const runtimeProfile = getRuntimeProfile()
-  const auth = options.password ? createAuthManager(options.password, { trustProxy: options.trustProxy ?? false }) : null
+  const configuredPassword = options.password ?? process.env.KANNA_PASSWORD?.trim() ?? null
+  const requiresRemoteAuth = Boolean(options.share)
+    || !["127.0.0.1", "localhost", "::1"].includes(hostname)
+  const launchPassword = configuredPassword || (requiresRemoteAuth ? randomBytes(18).toString("base64url") : null)
+  if (requiresRemoteAuth && !configuredPassword && launchPassword) {
+    options.onMigrationProgress?.(`${LOG_PREFIX} generated one-time launch password: ${launchPassword}`)
+  }
   const store = new EventStore(options.dataDir)
+  const auth = launchPassword
+    ? await createAuthManager(launchPassword, {
+      trustProxy: options.trustProxy ?? false,
+      sessionStorePath: path.join(store.dataDir, "auth-sessions.json"),
+    })
+    : null
   const diffStore = new DiffStore(store.dataDir)
   const machineDisplayName = getMachineDisplayName()
   await store.initialize()
@@ -138,6 +159,55 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
       router.scheduleBroadcast()
     },
   })
+  const shouldSyncCodexThreads = process.env.KANNA_SYNC_CODEX_THREADS !== "0"
+  let codexThreadSyncPromise: Promise<{ imported: number; errors: string[] }> | null = null
+  let codexThreadSyncNeedsRerun = false
+
+  function syncSavedCodexThreads() {
+    if (!shouldSyncCodexThreads) {
+      return Promise.resolve({ imported: 0, errors: [] })
+    }
+    if (codexThreadSyncPromise) {
+      codexThreadSyncNeedsRerun = true
+      return codexThreadSyncPromise
+    }
+
+    codexThreadSyncPromise = (async () => {
+      const combined = { imported: 0, errors: [] as string[] }
+      do {
+        codexThreadSyncNeedsRerun = false
+        const result = await agent.syncCodexThreads(getCodexThreadSyncProjects(store.state))
+        combined.imported += result.imported
+        combined.errors.push(...result.errors)
+      } while (codexThreadSyncNeedsRerun)
+      return combined
+    })()
+      .finally(() => {
+        codexThreadSyncPromise = null
+      })
+    return codexThreadSyncPromise
+  }
+
+  function reportCodexThreadSyncResult(syncResult: { imported: number; errors: string[] }) {
+    if (syncResult.imported > 0) {
+      options.onMigrationProgress?.(`${LOG_PREFIX} synchronized ${syncResult.imported} Codex threads`)
+      router.scheduleBroadcast()
+    }
+    for (const error of syncResult.errors) {
+      options.onMigrationProgress?.(`${LOG_PREFIX} Codex thread sync skipped ${error}`)
+    }
+  }
+
+  async function refreshDiscoveryAndSyncCodexThreads() {
+    await refreshDiscovery()
+    void syncSavedCodexThreads()
+      .then(reportCodexThreadSyncResult)
+      .catch((error) => {
+        options.onMigrationProgress?.(`${LOG_PREFIX} Codex thread sync failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    return discoveredProjects
+  }
+  const worktreeManager = new WorktreeManager(store)
   router = createWsRouter({
     store,
     diffStore,
@@ -151,11 +221,21 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
       write: writeLlmProviderSnapshot,
       validate: validateLlmProviderCredentials,
     },
-    refreshDiscovery,
+    refreshDiscovery: refreshDiscoveryAndSyncCodexThreads,
     getDiscoveredProjects: () => discoveredProjects,
     machineDisplayName,
     updateManager,
+    worktreeManager,
   })
+  try {
+    await agent.refreshCodexModelCatalog(store.dataDir)
+  } catch (error) {
+    options.onMigrationProgress?.(`${LOG_PREFIX} Codex model discovery unavailable: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (shouldSyncCodexThreads) {
+    const syncResult = await syncSavedCodexThreads()
+    reportCodexThreadSyncResult(syncResult)
+  }
   const staleEmptyChatPruneInterval = setInterval(() => {
     void router.pruneStaleEmptyChats()
       .then(() => router.broadcastSnapshots())
@@ -278,7 +358,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     host: hostname,
     openBrowser: options.openBrowser ?? true,
     share: options.share ?? false,
-    password: options.password ?? null,
+    password: launchPassword,
     strictPort,
   })
 
@@ -287,6 +367,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     for (const chatId of [...agent.activeTurns.keys()]) {
       await agent.cancel(chatId)
     }
+    agent.stopAllCodexSessions()
     router.dispose()
     appSettings.dispose()
     keybindings.dispose()
@@ -300,6 +381,7 @@ export async function startKannaServer(options: StartKannaServerOptions = {}) {
     store,
     diffStore,
     updateManager,
+    launchPassword,
     stop: shutdown,
   }
 }

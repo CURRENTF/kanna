@@ -47,6 +47,8 @@ describe("provider catalog normalization", () => {
     expect(normalizeCodexModelOptions(undefined)).toEqual({
       reasoningEffort: "high",
       fastMode: false,
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
     })
 
     const normalized = normalizeCodexModelOptions({
@@ -59,6 +61,8 @@ describe("provider catalog normalization", () => {
     expect(normalized).toEqual({
       reasoningEffort: "xhigh",
       fastMode: true,
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
     })
     expect(codexServiceTierFromModelOptions(normalized)).toBe("fast")
   })

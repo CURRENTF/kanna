@@ -170,6 +170,8 @@ export type ClaudeReasoningEffort = (typeof CLAUDE_REASONING_OPTIONS)[number]["i
 export type CodexReasoningEffort = (typeof CODEX_REASONING_OPTIONS)[number]["id"]
 export type ClaudeContextWindow = "200k" | "1m"
 export type ServiceTier = "fast"
+export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access"
+export type CodexApprovalPolicy = "untrusted" | "on-request" | "never"
 
 export interface ClaudeModelOptions {
   reasoningEffort: ClaudeReasoningEffort
@@ -179,6 +181,8 @@ export interface ClaudeModelOptions {
 export interface CodexModelOptions {
   reasoningEffort: CodexReasoningEffort
   fastMode: boolean
+  sandboxMode?: CodexSandboxMode
+  approvalPolicy?: CodexApprovalPolicy
 }
 
 export interface ProviderModelOptionsByProvider {
@@ -209,6 +213,8 @@ export const DEFAULT_CLAUDE_MODEL_OPTIONS = {
 export const DEFAULT_CODEX_MODEL_OPTIONS = {
   reasoningEffort: "high",
   fastMode: false,
+  sandboxMode: "workspace-write",
+  approvalPolicy: "on-request",
 } as const satisfies CodexModelOptions
 
 export function isClaudeReasoningEffort(value: unknown): value is ClaudeReasoningEffort {
@@ -217,6 +223,14 @@ export function isClaudeReasoningEffort(value: unknown): value is ClaudeReasonin
 
 export function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
   return CODEX_REASONING_OPTIONS.some((option) => option.id === value)
+}
+
+export function isCodexSandboxMode(value: unknown): value is CodexSandboxMode {
+  return value === "read-only" || value === "workspace-write" || value === "danger-full-access"
+}
+
+export function isCodexApprovalPolicy(value: unknown): value is CodexApprovalPolicy {
+  return value === "untrusted" || value === "on-request" || value === "never"
 }
 
 export const CLAUDE_CONTEXT_WINDOW_OPTIONS = [
@@ -380,12 +394,74 @@ export type KannaStatus =
   | "waiting_for_user"
   | "failed"
 
+export interface WorktreeInfo {
+  baseProjectId: string
+  basePath: string
+  repoRoot: string
+  branchName: string
+}
+
+export type CodexReviewTarget =
+  | { type: "uncommittedChanges" }
+  | { type: "baseBranch"; branch: string }
+  | { type: "commit"; sha: string; title: string | null }
+  | { type: "custom"; instructions: string }
+
+export interface CodexManagementSnapshot {
+  cwd: string
+  config: Record<string, unknown>
+  configLayers: unknown[]
+  skills: Array<{
+    name: string
+    description: string
+    path: string
+    scope: string
+    enabled: boolean
+  }>
+  hooks: Array<{
+    cwd: string
+    hooks: Array<{
+      key: string
+      eventName: string
+      command: string | null
+      sourcePath: string
+      source: string
+      enabled: boolean
+      trustStatus: string
+    }>
+    warnings: string[]
+    errors: unknown[]
+  }>
+  mcpServers: Array<{
+    name: string
+    authStatus: string
+    toolCount: number
+    resourceCount: number
+  }>
+  marketplaces: Array<{
+    name: string
+    path: string | null
+    displayName: string | null
+    plugins: Array<{
+      id: string
+      name: string
+      version: string | null
+      installed: boolean
+      enabled: boolean
+      availability: string
+      description: string | null
+    }>
+  }>
+  marketplaceLoadErrors: unknown[]
+}
+
 export interface ProjectSummary {
   id: string
   localPath: string
   title: string
   createdAt: number
   updatedAt: number
+  worktree?: WorktreeInfo
 }
 
 export interface SidebarChatRow {
@@ -408,6 +484,7 @@ export interface SidebarProjectGroup {
   realTitle: string
   sidebarTitle?: string
   localPath: string
+  worktree?: WorktreeInfo
   chats: SidebarChatRow[]
   previewChats: SidebarChatRow[]
   olderChats: SidebarChatRow[]
@@ -425,6 +502,7 @@ export interface LocalProjectSummary {
   source: "saved" | "discovered"
   lastOpenedAt?: number
   chatCount: number
+  worktree?: WorktreeInfo
 }
 
 export interface LocalProjectsSnapshot {
@@ -662,7 +740,13 @@ export interface DeleteFileToolCall
   extends ToolCallBase<"delete_file", { filePath: string; content: string }> { }
 
 export interface SubagentTaskToolCall
-  extends ToolCallBase<"subagent_task", { subagentType?: string }> { }
+  extends ToolCallBase<"subagent_task", {
+    subagentType?: string
+    senderThreadId?: string
+    receiverThreadIds?: string[]
+    prompt?: string | null
+    agentsStates?: Record<string, { status: string; message: string | null }>
+  }> { }
 
 export interface McpGenericToolCall
   extends ToolCallBase<"mcp_generic", { server: string; tool: string; payload: Record<string, unknown> }> { }
@@ -719,6 +803,25 @@ export interface AccountInfoEntry extends TranscriptEntryBase {
 export interface AssistantTextEntry extends TranscriptEntryBase {
   kind: "assistant_text"
   text: string
+  itemId?: string
+}
+
+export interface AssistantTextDeltaEntry extends TranscriptEntryBase {
+  kind: "assistant_text_delta"
+  itemId: string
+  delta: string
+}
+
+export interface ReasoningSummaryDeltaEntry extends TranscriptEntryBase {
+  kind: "reasoning_summary_delta"
+  itemId: string
+  delta: string
+}
+
+export interface TurnDiffEntry extends TranscriptEntryBase {
+  kind: "turn_diff"
+  turnId: string
+  diff: string
 }
 
 export interface ToolCallEntry extends TranscriptEntryBase {
@@ -939,6 +1042,9 @@ export type TranscriptEntry =
   | SystemInitEntry
   | AccountInfoEntry
   | AssistantTextEntry
+  | AssistantTextDeltaEntry
+  | ReasoningSummaryDeltaEntry
+  | TurnDiffEntry
   | ToolCallEntry
   | ToolResultEntry
   | ResultEntry
@@ -1059,6 +1165,8 @@ export type HydratedTranscriptMessage =
   | ({ kind: "system_init"; model: string; tools: string[]; agents: string[]; slashCommands: string[]; mcpServers: McpServerInfo[]; provider: AgentProvider; id: string; messageId?: string; timestamp: string; hidden?: boolean; debugRaw?: string })
   | ({ kind: "account_info"; accountInfo: AccountInfo; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ kind: "assistant_text"; text: string; id: string; messageId?: string; timestamp: string; hidden?: boolean })
+  | ({ kind: "reasoning_summary"; text: string; id: string; messageId?: string; timestamp: string; hidden?: boolean })
+  | ({ kind: "turn_diff"; turnId: string; diff: string; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ kind: "result"; success: boolean; cancelled?: boolean; result: string; durationMs: number; costUsd?: number; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ kind: "status"; status: string; id: string; messageId?: string; timestamp: string; hidden?: boolean })
   | ({ kind: "context_window_updated"; usage: ContextWindowUsageSnapshot; id: string; messageId?: string; timestamp: string; hidden?: boolean })

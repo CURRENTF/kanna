@@ -8,7 +8,9 @@ import {
   DEFAULT_CLAUDE_MODEL_OPTIONS,
   DEFAULT_CODEX_MODEL_OPTIONS,
   isClaudeReasoningEffort,
+  isCodexApprovalPolicy,
   isCodexReasoningEffort,
+  isCodexSandboxMode,
   normalizeClaudeContextWindow,
   normalizeClaudeModelId,
   normalizeCodexModelId,
@@ -199,6 +201,12 @@ function normalizeCodexPreference(value?: {
       fastMode: typeof value?.modelOptions?.fastMode === "boolean"
         ? value.modelOptions.fastMode
         : DEFAULT_CODEX_MODEL_OPTIONS.fastMode,
+      sandboxMode: isCodexSandboxMode(value?.modelOptions?.sandboxMode)
+        ? value.modelOptions.sandboxMode
+        : DEFAULT_CODEX_MODEL_OPTIONS.sandboxMode,
+      approvalPolicy: isCodexApprovalPolicy(value?.modelOptions?.approvalPolicy)
+        ? value.modelOptions.approvalPolicy
+        : DEFAULT_CODEX_MODEL_OPTIONS.approvalPolicy,
     },
     planMode: value?.planMode === true,
   }

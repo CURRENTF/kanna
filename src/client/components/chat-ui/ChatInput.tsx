@@ -862,6 +862,20 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       : { ...state, modelOptions: { ...state.modelOptions, fastMode: change.fastMode } }
                   )
                   break
+                case "sandboxMode":
+                  updateComposerState(
+                    (state) => state.provider === "claude"
+                      ? state
+                      : { ...state, modelOptions: { ...state.modelOptions, sandboxMode: change.sandboxMode } }
+                  )
+                  break
+                case "approvalPolicy":
+                  updateComposerState(
+                    (state) => state.provider === "claude"
+                      ? state
+                      : { ...state, modelOptions: { ...state.modelOptions, approvalPolicy: change.approvalPolicy } }
+                  )
+                  break
               }
             }}
             planMode={providerPrefs.planMode}

@@ -41,9 +41,13 @@ interface ChatTranscriptViewportProps {
   onStopDraining: () => void
   onSteerQueuedMessage: (queuedMessageId: string) => Promise<void>
   onRemoveQueuedMessage: (queuedMessageId: string) => Promise<void>
+  onUpdateQueuedMessage: (queuedMessageId: string, content: string) => Promise<void>
+  onReorderQueuedMessages: (queuedMessageIds: string[]) => Promise<void>
   onOpenLocalLink: KannaState["handleOpenLocalLink"]
   onAskUserQuestionSubmit: KannaState["handleAskUserQuestion"]
   onExitPlanModeConfirm: KannaState["handleExitPlanMode"]
+  onOpenSubagent: KannaState["handleOpenSubagent"]
+  onStopSubagent: KannaState["handleStopSubagent"]
   showScrollButton: boolean
   onIsAtEndChange: (isAtEnd: boolean) => void
   scrollToBottom: () => void
@@ -75,9 +79,13 @@ export const ChatTranscriptViewport = memo(function ChatTranscriptViewport({
   onStopDraining,
   onSteerQueuedMessage,
   onRemoveQueuedMessage,
+  onUpdateQueuedMessage,
+  onReorderQueuedMessages,
   onOpenLocalLink,
   onAskUserQuestionSubmit,
   onExitPlanModeConfirm,
+  onOpenSubagent,
+  onStopSubagent,
   showScrollButton,
   onIsAtEndChange,
   scrollToBottom,
@@ -218,9 +226,11 @@ export const ChatTranscriptViewport = memo(function ChatTranscriptViewport({
         onToolGroupExpandedChange={handleToolGroupExpandedChange}
         onAskUserQuestionSubmit={onAskUserQuestionSubmit}
         onExitPlanModeConfirm={onExitPlanModeConfirm}
+        onOpenSubagent={onOpenSubagent}
+        onStopSubagent={onStopSubagent}
       />
     </div>
-  ), [handleToolGroupExpandedChange, onAskUserQuestionSubmit, onExitPlanModeConfirm, toolGroupExpanded])
+  ), [handleToolGroupExpandedChange, onAskUserQuestionSubmit, onExitPlanModeConfirm, onOpenSubagent, onStopSubagent, toolGroupExpanded])
 
   const listHeader = (
     <div className="mx-auto w-full max-w-[800px]" style={{ paddingTop: `${headerOffsetPx}px` }}>
@@ -242,12 +252,23 @@ export const ChatTranscriptViewport = memo(function ChatTranscriptViewport({
   const listFooter = (
     <div className="mx-auto w-full max-w-[800px]">
       {isProcessing ? <ProcessingMessage status={runtimeStatus ?? undefined} /> : null}
-      {queuedMessages.map((message) => (
+      {queuedMessages.map((message, index) => (
         <QueuedUserMessage
           key={message.id}
           message={message}
           onRemove={() => void onRemoveQueuedMessage(message.id)}
           onSendNow={() => void onSteerQueuedMessage(message.id)}
+          onEdit={(content) => onUpdateQueuedMessage(message.id, content)}
+          onMoveUp={index === 0 ? undefined : () => {
+            const ids = queuedMessages.map((entry) => entry.id)
+            ;[ids[index - 1], ids[index]] = [ids[index]!, ids[index - 1]!]
+            void onReorderQueuedMessages(ids)
+          }}
+          onMoveDown={index === queuedMessages.length - 1 ? undefined : () => {
+            const ids = queuedMessages.map((entry) => entry.id)
+            ;[ids[index], ids[index + 1]] = [ids[index + 1]!, ids[index]!]
+            void onReorderQueuedMessages(ids)
+          }}
         />
       ))}
       {!isProcessing && isDraining ? (

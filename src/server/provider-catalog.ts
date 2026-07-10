@@ -15,7 +15,9 @@ import {
   normalizeClaudeContextWindow,
   normalizeProviderModelId,
   isClaudeReasoningEffort,
+  isCodexApprovalPolicy,
   isCodexReasoningEffort,
+  isCodexSandboxMode,
 } from "../shared/types"
 
 const HARD_CODED_CODEX_MODELS: ProviderModelOption[] = [
@@ -104,6 +106,31 @@ export function applyClaudeSdkModels(models: readonly ClaudeSdkModelInfo[]) {
   return true
 }
 
+export function applyCodexAppServerModels(models: ReadonlyArray<{
+  id: string
+  model: string
+  displayName: string
+  isDefault: boolean
+  supportedReasoningEfforts: readonly unknown[]
+}>) {
+  const codexIndex = SERVER_PROVIDERS.findIndex((provider) => provider.id === "codex")
+  const codexProvider = SERVER_PROVIDERS[codexIndex]
+  if (!codexProvider || models.length === 0) return false
+
+  const options: ProviderModelOption[] = models.map((model) => ({
+    id: model.model || model.id,
+    label: model.displayName?.trim() || model.model || model.id,
+    supportsEffort: model.supportedReasoningEfforts.length > 0,
+  }))
+  const defaultModel = models.find((model) => model.isDefault)
+  SERVER_PROVIDERS.splice(codexIndex, 1, {
+    ...codexProvider,
+    defaultModel: defaultModel?.model || defaultModel?.id || options[0]!.id,
+    models: options,
+  })
+  return true
+}
+
 export function getServerProviderCatalog(provider: AgentProvider): ProviderCatalogEntry {
   const entry = SERVER_PROVIDERS.find((candidate) => candidate.id === provider)
   if (!entry) {
@@ -148,6 +175,12 @@ export function normalizeCodexModelOptions(modelOptions?: ModelOptions, legacyEf
     fastMode: typeof modelOptions?.codex?.fastMode === "boolean"
       ? modelOptions.codex.fastMode
       : DEFAULT_CODEX_MODEL_OPTIONS.fastMode,
+    sandboxMode: isCodexSandboxMode(modelOptions?.codex?.sandboxMode)
+      ? modelOptions.codex.sandboxMode
+      : DEFAULT_CODEX_MODEL_OPTIONS.sandboxMode,
+    approvalPolicy: isCodexApprovalPolicy(modelOptions?.codex?.approvalPolicy)
+      ? modelOptions.codex.approvalPolicy
+      : DEFAULT_CODEX_MODEL_OPTIONS.approvalPolicy,
   }
 }
 

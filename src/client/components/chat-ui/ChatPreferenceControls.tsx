@@ -1,5 +1,5 @@
 import { useState, type ComponentType, type SVGProps } from "react"
-import { Box, Brain, Gauge, ListTodo, LockOpen, SquareMenu, SquareMinus } from "lucide-react"
+import { Box, Brain, Gauge, ListTodo, LockOpen, ShieldAlert, ShieldCheck, ShieldOff, SquareMenu, SquareMinus } from "lucide-react"
 import {
   CLAUDE_CONTEXT_WINDOW_OPTIONS,
   CLAUDE_REASONING_OPTIONS,
@@ -9,7 +9,9 @@ import {
   type ClaudeModelOptions,
   type ClaudeReasoningEffort,
   type CodexModelOptions,
+  type CodexApprovalPolicy,
   type CodexReasoningEffort,
+  type CodexSandboxMode,
   type ProviderCatalogEntry,
   supportsClaudeMaxReasoningEffort,
 } from "../../../shared/types"
@@ -137,6 +139,8 @@ export type ModelOptionChange =
   | { type: "contextWindow"; contextWindow: ClaudeContextWindow }
   | { type: "codexReasoningEffort"; effort: CodexReasoningEffort }
   | { type: "fastMode"; fastMode: boolean }
+  | { type: "sandboxMode"; sandboxMode: CodexSandboxMode }
+  | { type: "approvalPolicy"; approvalPolicy: CodexApprovalPolicy }
 
 interface ChatPreferenceControlsProps {
   availableProviders: ProviderCatalogEntry[]
@@ -353,12 +357,79 @@ export function ChatPreferenceControls({
         </InputPopover>
       ) : null}
 
+      {selectedProvider === "codex" ? (
+        <InputPopover
+          trigger={(
+            <>
+              {codexModelOptions?.sandboxMode === "danger-full-access"
+                ? <ShieldOff className="h-3.5 w-3.5" />
+                : codexModelOptions?.sandboxMode === "read-only"
+                  ? <ShieldCheck className="h-3.5 w-3.5" />
+                  : <ShieldAlert className="h-3.5 w-3.5" />}
+              <span>{codexModelOptions?.sandboxMode === "danger-full-access" ? "Full access" : codexModelOptions?.sandboxMode === "read-only" ? "Read only" : "Workspace"}</span>
+            </>
+          )}
+          triggerClassName={codexModelOptions?.sandboxMode === "danger-full-access" ? "text-amber-600 dark:text-amber-400" : undefined}
+        >
+          {(close) => ([
+            { id: "read-only" as const, label: "Read only", description: "Inspect files without modifying them", icon: ShieldCheck },
+            { id: "workspace-write" as const, label: "Workspace write", description: "Modify files inside the active project", icon: ShieldAlert },
+            { id: "danger-full-access" as const, label: "Full access", description: "Allow unrestricted filesystem and command access", icon: ShieldOff },
+          ] satisfies Array<{ id: CodexSandboxMode; label: string; description: string; icon: typeof ShieldCheck }>).map((option) => {
+            const Icon = option.icon
+            return (
+              <PopoverMenuItem
+                key={option.id}
+                onClick={() => {
+                  onModelOptionChange({ type: "sandboxMode", sandboxMode: option.id })
+                  close()
+                }}
+                selected={codexModelOptions?.sandboxMode === option.id}
+                icon={<Icon className="h-4 w-4 text-muted-foreground" />}
+                label={option.label}
+                description={option.description}
+              />
+            )
+          })}
+        </InputPopover>
+      ) : null}
+
+      {selectedProvider === "codex" ? (
+        <InputPopover
+          trigger={(
+            <>
+              {codexModelOptions?.approvalPolicy === "never" ? <ShieldOff className="h-3.5 w-3.5" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+              <span>{codexModelOptions?.approvalPolicy === "never" ? "No approval" : codexModelOptions?.approvalPolicy === "untrusted" ? "Strict approval" : "Ask approval"}</span>
+            </>
+          )}
+          triggerClassName={codexModelOptions?.approvalPolicy === "never" ? "text-amber-600 dark:text-amber-400" : undefined}
+        >
+          {(close) => ([
+            { id: "untrusted" as const, label: "Strict approval", description: "Ask before commands not covered by trusted rules" },
+            { id: "on-request" as const, label: "Ask when needed", description: "Let Codex request elevated access" },
+            { id: "never" as const, label: "Never ask", description: "Run without interactive approval prompts" },
+          ] satisfies Array<{ id: CodexApprovalPolicy; label: string; description: string }>).map((option) => (
+            <PopoverMenuItem
+              key={option.id}
+              onClick={() => {
+                onModelOptionChange({ type: "approvalPolicy", approvalPolicy: option.id })
+                close()
+              }}
+              selected={codexModelOptions?.approvalPolicy === option.id}
+              icon={option.id === "never" ? <ShieldOff className="h-4 w-4 text-muted-foreground" /> : <ShieldCheck className="h-4 w-4 text-muted-foreground" />}
+              label={option.label}
+              description={option.description}
+            />
+          ))}
+        </InputPopover>
+      ) : null}
+
       {showPlanMode ? (
         <InputPopover
           trigger={(
             <>
               {planMode ? <ListTodo className="h-3.5 w-3.5" /> : <LockOpen className="h-3.5 w-3.5" />}
-              <span>{planMode ? "Plan Mode" : "Full Access"}</span>
+              <span>{planMode ? "Plan Mode" : "Default Mode"}</span>
             </>
           )}
           triggerClassName={planMode ? "text-blue-400 dark:text-blue-300" : undefined}
@@ -372,8 +443,8 @@ export function ChatPreferenceControls({
                 }}
                 selected={!planMode}
                 icon={<LockOpen className="h-4 w-4 text-muted-foreground" />}
-                label="Full Access"
-                description="Execution without approval"
+                label="Default Mode"
+                description="Work using the selected sandbox and approval policy"
               />
               <PopoverMenuItem
                 onClick={() => {

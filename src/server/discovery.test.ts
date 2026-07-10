@@ -159,6 +159,32 @@ describe("project discovery", () => {
     )
   })
 
+  test("Codex adapter discovers projects from an explicit CODEX_HOME outside HOME", () => {
+    const homeDir = makeTempDir()
+    const codexHomeDir = path.join(makeTempDir(), "codex-home")
+    const sessionsDir = path.join(codexHomeDir, "sessions", "2026", "07", "10")
+    const projectDir = path.join(homeDir, "workspace", "external-codex-home")
+    mkdirSync(projectDir, { recursive: true })
+    mkdirSync(sessionsDir, { recursive: true })
+
+    writeFileSync(path.join(codexHomeDir, "session_index.jsonl"), `${JSON.stringify({
+      id: "external-session",
+      updated_at: "2026-07-10T12:00:00.000Z",
+    })}\n`)
+    writeFileSync(path.join(sessionsDir, "rollout-external-session.jsonl"), `${JSON.stringify({
+      timestamp: "2026-07-10T11:59:00.000Z",
+      type: "session_meta",
+      payload: {
+        id: "external-session",
+        cwd: projectDir,
+      },
+    })}\n`)
+
+    const projects = new CodexProjectDiscoveryAdapter(codexHomeDir).scan(homeDir)
+
+    expect(projects.map((project) => project.localPath)).toEqual([projectDir])
+  })
+
   test("discoverProjects de-dupes provider results by normalized path and keeps the newest timestamp", () => {
     const adapters: ProjectDiscoveryAdapter[] = [
       {

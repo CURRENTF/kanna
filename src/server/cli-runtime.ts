@@ -1,5 +1,6 @@
 import process from "node:process"
 import { spawnSync } from "node:child_process"
+import { randomBytes } from "node:crypto"
 import { hasCommand, spawnDetached } from "./process-utils"
 import { APP_NAME, CLI_COMMAND, getDataDirDisplay, LOG_PREFIX, PACKAGE_NAME } from "../shared/branding"
 import type { ShareMode } from "../shared/share"
@@ -92,6 +93,7 @@ Options:
   --cloudflared <token>
                        Run a named Cloudflare tunnel from a token
   --password <secret>  Require a password before loading the app
+                       KANNA_PASSWORD can provide it without exposing it in process arguments
   --strict-port        Fail instead of trying another port
   --no-open            Don't open browser automatically
   --version            Print version and exit
@@ -269,8 +271,20 @@ export async function runCli(argv: string[], deps: CliRuntimeDeps): Promise<CliR
     return { kind: "restarting", reason: shouldRestart }
   }
 
+  const configuredPassword = (parsedArgs.options.password ?? process.env.KANNA_PASSWORD?.trim()) || null
+  const requiresRemoteAuth = isShareEnabled(parsedArgs.options.share)
+    || !["127.0.0.1", "localhost", "::1"].includes(parsedArgs.options.host)
+  const effectivePassword = configuredPassword
+    ?? (requiresRemoteAuth ? randomBytes(18).toString("base64url") : null)
+
+  if (requiresRemoteAuth && !configuredPassword && effectivePassword) {
+    deps.warn(`${LOG_PREFIX} no remote password was configured; generated a one-time launch password`)
+    deps.log(`${LOG_PREFIX} launch password: ${effectivePassword}`)
+  }
+
   const { port, stop } = await deps.startServer({
     ...parsedArgs.options,
+    password: effectivePassword,
     trustProxy: isShareEnabled(parsedArgs.options.share),
     onMigrationProgress: deps.log,
     update: {

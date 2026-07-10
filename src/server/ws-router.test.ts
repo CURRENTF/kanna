@@ -2192,4 +2192,192 @@ describe("ws-router", () => {
       result: { snapshotChanged: false },
     })
   })
+
+  test("routes Codex management commands through the agent", async () => {
+    const calls: Array<{ method: string; args: unknown[] }> = []
+    const management = { cwd: "/tmp/project", config: {}, skills: [], hooks: [], mcpServers: [], marketplaces: [], marketplaceLoadErrors: [] }
+    const authorization = { authorizationUrl: "https://example.test/oauth" }
+    const record = (method: string, result: unknown) => async (...args: unknown[]) => {
+      calls.push({ method, args })
+      return result
+    }
+    const router = createWsRouter({
+      store: { state: createEmptyState() } as never,
+      agent: {
+        getActiveStatuses: () => new Map(),
+        getDrainingChatIds: () => new Set(),
+        readCodexManagement: record("read", management),
+        writeCodexConfig: record("writeConfig", { ok: true }),
+        toggleCodexSkill: record("toggleSkill", { ok: true }),
+        installCodexPlugin: record("installPlugin", { ok: true }),
+        uninstallCodexPlugin: record("uninstallPlugin", { ok: true }),
+        addCodexMarketplace: record("addMarketplace", { ok: true }),
+        removeCodexMarketplace: record("removeMarketplace", { ok: true }),
+        upgradeCodexMarketplaces: record("upgradeMarketplaces", { ok: true }),
+        startCodexMcpOauth: record("startMcpOauth", authorization),
+        reloadCodexMcp: record("reloadMcp", { ok: true }),
+      } as never,
+      terminals: { getSnapshot: () => null, onEvent: () => () => {} } as never,
+      keybindings: { getSnapshot: () => DEFAULT_KEYBINDINGS_SNAPSHOT, onChange: () => () => {} } as never,
+      refreshDiscovery: async () => [],
+      getDiscoveredProjects: () => [],
+      machineDisplayName: "Local Machine",
+      updateManager: null,
+    })
+    const ws = new FakeWebSocket()
+    const commands = [
+      { id: "read", command: { type: "settings.readCodexManagement", cwd: "/tmp/project" } },
+      { id: "write", command: { type: "settings.writeCodexConfig", cwd: "/tmp/project", keyPath: "model", value: "gpt-5.4" } },
+      { id: "skill", command: { type: "settings.toggleCodexSkill", cwd: "/tmp/project", path: "/tmp/demo/SKILL.md", enabled: false } },
+      { id: "install", command: { type: "settings.installCodexPlugin", cwd: "/tmp/project", pluginName: "demo" } },
+      { id: "uninstall", command: { type: "settings.uninstallCodexPlugin", cwd: "/tmp/project", pluginId: "demo" } },
+      { id: "market-add", command: { type: "settings.addCodexMarketplace", cwd: "/tmp/project", source: "owner/market" } },
+      { id: "market-remove", command: { type: "settings.removeCodexMarketplace", cwd: "/tmp/project", marketplaceName: "market" } },
+      { id: "market-upgrade", command: { type: "settings.upgradeCodexMarketplaces", cwd: "/tmp/project", marketplaceName: "market" } },
+      { id: "oauth", command: { type: "settings.startCodexMcpOauth", cwd: "/tmp/project", name: "demo-mcp" } },
+      { id: "reload", command: { type: "settings.reloadCodexMcp", cwd: "/tmp/project" } },
+    ]
+
+    for (const entry of commands) {
+      await router.handleMessage(ws as never, JSON.stringify({ v: 1, type: "command", ...entry }))
+    }
+
+    expect(calls.map((call) => call.method)).toEqual([
+      "read",
+      "writeConfig",
+      "toggleSkill",
+      "installPlugin",
+      "uninstallPlugin",
+      "addMarketplace",
+      "removeMarketplace",
+      "upgradeMarketplaces",
+      "startMcpOauth",
+      "reloadMcp",
+    ])
+    expect(ws.sent).toContainEqual({ v: PROTOCOL_VERSION, type: "ack", id: "read", result: management })
+    expect(ws.sent).toContainEqual({ v: PROTOCOL_VERSION, type: "ack", id: "oauth", result: authorization })
+    expect(ws.sent.filter((message: any) => message.type === "error")).toHaveLength(0)
+  })
+
+  test("creates a managed worktree chat and hands it back to the base project", async () => {
+    const state = createEmptyState()
+    const baseProject = {
+      id: "project-base",
+      localPath: "/tmp/project",
+      title: "Project",
+      createdAt: 1,
+      updatedAt: 1,
+    }
+    state.projectsById.set(baseProject.id, baseProject)
+    state.chatsById.set("chat-base", {
+      id: "chat-base",
+      projectId: baseProject.id,
+      title: "Implement feature",
+      createdAt: 1,
+      updatedAt: 1,
+      unread: false,
+      provider: "codex",
+      planMode: false,
+      sessionToken: "thread-base",
+      pendingForkSessionToken: null,
+      lastTurnOutcome: null,
+    })
+
+    const forkTargets: Array<{ chatId: string; projectId?: string }> = []
+    const router = createWsRouter({
+      store: {
+        state,
+        requireChat: (chatId: string) => {
+          const chat = state.chatsById.get(chatId)
+          if (!chat) throw new Error("Chat not found")
+          return chat
+        },
+        getProject: (projectId: string) => state.projectsById.get(projectId) ?? null,
+        openProject: async () => baseProject,
+      } as never,
+      agent: {
+        getActiveStatuses: () => new Map(),
+        getDrainingChatIds: () => new Set(),
+        forkChat: async (chatId: string, projectId?: string) => {
+          forkTargets.push({ chatId, projectId })
+          if (projectId === "project-worktree") {
+            state.chatsById.set("chat-worktree", {
+              ...state.chatsById.get("chat-base")!,
+              id: "chat-worktree",
+              projectId,
+              sessionToken: null,
+              pendingForkSessionToken: "thread-base",
+            })
+            return { chatId: "chat-worktree" }
+          }
+          return { chatId: "chat-local" }
+        },
+      } as never,
+      worktreeManager: {
+        createForProject: async () => {
+          const worktree = {
+            baseProjectId: baseProject.id,
+            basePath: baseProject.localPath,
+            repoRoot: baseProject.localPath,
+            branchName: "codex/implement-feature",
+            managed: true,
+            createdAt: 2,
+          }
+          const project = {
+            id: "project-worktree",
+            localPath: "/tmp/kanna-worktrees/implement-feature",
+            title: "Project (implement-feature)",
+            createdAt: 2,
+            updatedAt: 2,
+            worktree,
+          }
+          state.projectsById.set(project.id, project)
+          return { project, worktree }
+        },
+        remove: async () => ({ ok: true }),
+      } as never,
+      terminals: { getSnapshot: () => null, onEvent: () => () => {} } as never,
+      keybindings: { getSnapshot: () => DEFAULT_KEYBINDINGS_SNAPSHOT, onChange: () => () => {} } as never,
+      refreshDiscovery: async () => [],
+      getDiscoveredProjects: () => [],
+      machineDisplayName: "Local Machine",
+      updateManager: null,
+    })
+    const ws = new FakeWebSocket()
+
+    await router.handleMessage(ws as never, JSON.stringify({
+      v: 1,
+      type: "command",
+      id: "worktree-create",
+      command: { type: "chat.createWorktree", chatId: "chat-base", branchName: "codex/implement-feature" },
+    }))
+    await router.handleMessage(ws as never, JSON.stringify({
+      v: 1,
+      type: "command",
+      id: "handoff-local",
+      command: { type: "chat.handoffToLocal", chatId: "chat-worktree" },
+    }))
+
+    expect(forkTargets).toEqual([
+      { chatId: "chat-base", projectId: "project-worktree" },
+      { chatId: "chat-worktree", projectId: "project-base" },
+    ])
+    expect(ws.sent).toContainEqual({
+      v: PROTOCOL_VERSION,
+      type: "ack",
+      id: "worktree-create",
+      result: {
+        chatId: "chat-worktree",
+        projectId: "project-worktree",
+        localPath: "/tmp/kanna-worktrees/implement-feature",
+        branchName: "codex/implement-feature",
+      },
+    })
+    expect(ws.sent).toContainEqual({
+      v: PROTOCOL_VERSION,
+      type: "ack",
+      id: "handoff-local",
+      result: { chatId: "chat-local", projectId: "project-base" },
+    })
+  })
 })

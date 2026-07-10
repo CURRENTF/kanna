@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
-import { CodexAppServerManager } from "./codex-app-server"
+import { CodexAppServerManager, getProcessSharedCodexAppServerManager } from "./codex-app-server"
 import { isServerNotification } from "./codex-app-server-protocol"
 
 class FakeCodexProcess extends EventEmitter {
@@ -56,6 +56,101 @@ async function collectStream(stream: AsyncIterable<any>) {
 }
 
 describe("CodexAppServerManager", () => {
+  test("uses one process-wide manager for normal runtime consumers", () => {
+    expect(getProcessSharedCodexAppServerManager()).toBe(getProcessSharedCodexAppServerManager())
+  })
+
+  test("starts an inline native review", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({ id: message.id, result: { thread: { id: "thread-review" }, model: "gpt-5.4", reasoningEffort: "high" } })
+      } else if (message.method === "review/start") {
+        child.writeServerMessage({ id: message.id, result: { turn: { id: "turn-review", status: "inProgress", error: null }, reviewThreadId: "thread-review" } })
+        child.writeServerMessage({ method: "turn/completed", params: { threadId: "thread-review", turn: { id: "turn-review", status: "completed", error: null } } })
+      }
+    })
+    const manager = new CodexAppServerManager({ spawnProcess: () => process as never })
+    await manager.startSession({ chatId: "chat-review", cwd: "/tmp/project", model: "gpt-5.4", sessionToken: null })
+    const turn = await manager.startReview({
+      chatId: "chat-review",
+      model: "gpt-5.4",
+      target: { type: "baseBranch", branch: "main" },
+      onToolRequest: async () => ({}),
+    })
+    await collectStream(turn.stream)
+
+    const request = process.messages.find((message: any) => message.method === "review/start") as any
+    expect(request.params).toEqual({
+      threadId: "thread-review",
+      target: { type: "baseBranch", branch: "main" },
+      delivery: "inline",
+    })
+  })
+
+  test("sends image and file attachments and steers the active turn", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({ id: message.id, result: { thread: { id: "thread-attachments" }, model: "gpt-5.4", reasoningEffort: "high" } })
+      } else if (message.method === "turn/start") {
+        child.writeServerMessage({ id: message.id, result: { turn: { id: "turn-attachments", status: "inProgress", error: null } } })
+      } else if (message.method === "turn/steer") {
+        child.writeServerMessage({ id: message.id, result: { turnId: "turn-attachments" } })
+      }
+    })
+    const manager = new CodexAppServerManager({ spawnProcess: () => process as never })
+    await manager.startSession({ chatId: "chat-attachments", cwd: "/tmp/project", model: "gpt-5.4", sessionToken: null })
+    const turn = await manager.startTurn({
+      chatId: "chat-attachments",
+      model: "gpt-5.4",
+      content: "Inspect these",
+      attachments: [
+        { id: "image", kind: "image", displayName: "shot.png", absolutePath: "/tmp/shot.png", relativePath: "shot.png", contentUrl: "/shot.png", mimeType: "image/png", size: 1 },
+        { id: "file", kind: "file", displayName: "notes.txt", absolutePath: "/tmp/notes.txt", relativePath: "notes.txt", contentUrl: "/notes.txt", mimeType: "text/plain", size: 2 },
+      ],
+      planMode: false,
+      onToolRequest: async () => ({}),
+    })
+    await manager.steerTurn("chat-attachments", "Also check this")
+
+    const start = process.messages.find((message: any) => message.method === "turn/start") as any
+    expect(start.params.input).toEqual([
+      { type: "text", text: "Inspect these", text_elements: [] },
+      { type: "localImage", path: "/tmp/shot.png", detail: "auto" },
+      { type: "mention", name: "notes.txt", path: "/tmp/notes.txt" },
+    ])
+    const steer = process.messages.find((message: any) => message.method === "turn/steer") as any
+    expect(steer.params).toMatchObject({ threadId: "thread-attachments", expectedTurnId: "turn-attachments" })
+    turn.close()
+  })
+
+  test("streams assistant, reasoning, and turn diff deltas", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: {} })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({ id: message.id, result: { thread: { id: "thread-stream" }, model: "gpt-5.4", reasoningEffort: "high" } })
+      } else if (message.method === "turn/start") {
+        child.writeServerMessage({ id: message.id, result: { turn: { id: "turn-stream", status: "inProgress", error: null } } })
+        child.writeServerMessage({ method: "item/agentMessage/delta", params: { threadId: "thread-stream", turnId: "turn-stream", itemId: "message-1", delta: "Hello" } })
+        child.writeServerMessage({ method: "item/reasoning/summaryTextDelta", params: { threadId: "thread-stream", turnId: "turn-stream", itemId: "reasoning-1", delta: "Thinking", summaryIndex: 0 } })
+        child.writeServerMessage({ method: "turn/diff/updated", params: { threadId: "thread-stream", turnId: "turn-stream", diff: "+++ b/a.ts\n+ok" } })
+        child.writeServerMessage({ method: "turn/completed", params: { threadId: "thread-stream", turn: { id: "turn-stream", status: "completed", error: null } } })
+      }
+    })
+    const manager = new CodexAppServerManager({ spawnProcess: () => process as never })
+    await manager.startSession({ chatId: "chat-stream", cwd: "/tmp/project", model: "gpt-5.4", sessionToken: null })
+    const turn = await manager.startTurn({ chatId: "chat-stream", model: "gpt-5.4", content: "go", planMode: false, onToolRequest: async () => ({}) })
+    const events = await collectStream(turn.stream)
+
+    expect(events.some((event) => event.entry?.kind === "assistant_text_delta" && event.entry.delta === "Hello")).toBe(true)
+    expect(events.some((event) => event.entry?.kind === "reasoning_summary_delta" && event.entry.delta === "Thinking")).toBe(true)
+    expect(events.some((event) => event.entry?.kind === "turn_diff" && event.entry.diff.includes("a.ts"))).toBe(true)
+  })
+
   test("initializes app-server and starts a fresh thread", async () => {
     const process = new FakeCodexProcess((message, child) => {
       if (message.method === "initialize") {
@@ -83,6 +178,288 @@ describe("CodexAppServerManager", () => {
     expect((process.messages[0] as any).method).toBe("initialize")
     expect((process.messages[1] as any).method).toBe("initialized")
     expect((process.messages[2] as any).method).toBe("thread/start")
+  })
+
+  test("shares one app-server across chats and routes interleaved thread events", async () => {
+    let spawnCount = 0
+    let nextThread = 0
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        nextThread += 1
+        child.writeServerMessage({
+          id: message.id,
+          result: {
+            thread: { id: `thread-${nextThread}` },
+            model: "gpt-5.4",
+            reasoningEffort: "high",
+          },
+        })
+      } else if (message.method === "turn/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: {
+            turn: { id: `turn-${message.params.threadId}`, status: "inProgress", error: null },
+          },
+        })
+      }
+    })
+    const manager = new CodexAppServerManager({
+      spawnProcess: () => {
+        spawnCount += 1
+        return process as never
+      },
+    })
+
+    await manager.startSession({ chatId: "chat-a", cwd: "/tmp/project-a", model: "gpt-5.4", sessionToken: null })
+    await manager.startSession({ chatId: "chat-b", cwd: "/tmp/project-b", model: "gpt-5.4", sessionToken: null })
+    const turnA = await manager.startTurn({ chatId: "chat-a", model: "gpt-5.4", content: "A", planMode: false, onToolRequest: async () => ({}) })
+    const turnB = await manager.startTurn({ chatId: "chat-b", model: "gpt-5.4", content: "B", planMode: false, onToolRequest: async () => ({}) })
+
+    process.writeServerMessage({ method: "item/agentMessage/delta", params: { threadId: "thread-2", turnId: "turn-thread-2", itemId: "message-b", delta: "from B" } })
+    process.writeServerMessage({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-thread-1", itemId: "message-a", delta: "from A" } })
+    process.writeServerMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-thread-1", status: "completed", error: null } } })
+    process.writeServerMessage({ method: "turn/completed", params: { threadId: "thread-2", turn: { id: "turn-thread-2", status: "completed", error: null } } })
+
+    const [eventsA, eventsB] = await Promise.all([collectStream(turnA.stream), collectStream(turnB.stream)])
+    expect(spawnCount).toBe(1)
+    expect(process.messages.filter((message: any) => message.method === "initialize")).toHaveLength(1)
+    expect(eventsA.some((event) => event.entry?.kind === "assistant_text_delta" && event.entry.delta === "from A")).toBe(true)
+    expect(eventsA.some((event) => event.entry?.delta === "from B")).toBe(false)
+    expect(eventsB.some((event) => event.entry?.kind === "assistant_text_delta" && event.entry.delta === "from B")).toBe(true)
+    expect(eventsB.some((event) => event.entry?.delta === "from A")).toBe(false)
+
+    manager.stopSession("chat-a")
+    expect(process.killed).toBe(false)
+    manager.stopAll()
+    expect(process.killed).toBe(true)
+  })
+
+  test("resumes an existing chat when sandbox or approval preferences change", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { thread: { id: "thread-settings" }, model: "gpt-5.5", reasoningEffort: "high" },
+        })
+      } else if (message.method === "thread/resume") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { thread: { id: "thread-settings" }, model: "gpt-5.5", reasoningEffort: "high" },
+        })
+      } else if (message.method === "turn/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { turn: { id: "turn-settings", status: "inProgress", error: null } },
+        })
+      }
+    })
+    const manager = new CodexAppServerManager({ spawnProcess: () => process as never })
+
+    const threadId = await manager.startSession({
+      chatId: "chat-settings",
+      cwd: "/tmp/project",
+      model: "gpt-5.5",
+      sessionToken: null,
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
+    })
+    await manager.startSession({
+      chatId: "chat-settings",
+      cwd: "/tmp/project",
+      model: "gpt-5.5",
+      sessionToken: threadId ?? null,
+      sandboxMode: "read-only",
+      approvalPolicy: "never",
+    })
+    await manager.startTurn({
+      chatId: "chat-settings",
+      model: "gpt-5.5",
+      content: "Check settings",
+      planMode: false,
+      approvalPolicy: "never",
+      onToolRequest: async () => ({}),
+    })
+
+    const resume = process.messages.find((message: any) => message.method === "thread/resume") as any
+    expect(resume?.params).toMatchObject({
+      threadId: "thread-settings",
+      sandbox: "read-only",
+      approvalPolicy: "never",
+    })
+    const turn = process.messages.find((message: any) => message.method === "turn/start") as any
+    expect(turn?.params.sandboxPolicy).toEqual({
+      type: "readOnly",
+      networkAccess: false,
+    })
+    expect(process.killed).toBe(false)
+  })
+
+  test("fails all active turns when the shared app-server exits and reconnects on demand", async () => {
+    const processes: FakeCodexProcess[] = []
+    const manager = new CodexAppServerManager({
+      spawnProcess: () => {
+        const process = new FakeCodexProcess((message, child) => {
+          if (message.method === "initialize") {
+            child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+          } else if (message.method === "thread/resume") {
+            child.writeServerMessage({
+              id: message.id,
+              result: { thread: { id: message.params.threadId }, model: "gpt-5.4", reasoningEffort: "high" },
+            })
+          } else if (message.method === "turn/start") {
+            child.writeServerMessage({
+              id: message.id,
+              result: { turn: { id: `turn-${message.params.threadId}`, status: "inProgress", error: null } },
+            })
+          }
+        })
+        processes.push(process)
+        return process as never
+      },
+    })
+
+    await manager.startSession({ chatId: "chat-a", cwd: "/tmp/project-a", model: "gpt-5.4", sessionToken: "thread-a" })
+    await manager.startSession({ chatId: "chat-b", cwd: "/tmp/project-b", model: "gpt-5.4", sessionToken: "thread-b" })
+    const turnA = await manager.startTurn({ chatId: "chat-a", model: "gpt-5.4", content: "A", planMode: false, onToolRequest: async () => ({}) })
+    const turnB = await manager.startTurn({ chatId: "chat-b", model: "gpt-5.4", content: "B", planMode: false, onToolRequest: async () => ({}) })
+
+    processes[0]!.writeStderr("shared app-server crashed")
+    processes[0]!.closeWithCode(1)
+    const [eventsA, eventsB] = await Promise.all([collectStream(turnA.stream), collectStream(turnB.stream)])
+    expect(eventsA.at(-1)?.entry).toMatchObject({ kind: "result", subtype: "error", result: "shared app-server crashed" })
+    expect(eventsB.at(-1)?.entry).toMatchObject({ kind: "result", subtype: "error", result: "shared app-server crashed" })
+
+    await manager.startSession({ chatId: "chat-a", cwd: "/tmp/project-a", model: "gpt-5.4", sessionToken: "thread-a" })
+    expect(processes).toHaveLength(2)
+    expect(processes[1]!.messages.some((message: any) => message.method === "thread/resume" && message.params.threadId === "thread-a")).toBe(true)
+    manager.stopAll()
+  })
+
+  test("reuses one control app-server for model, thread, and management RPCs", async () => {
+    let spawnCount = 0
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "model/list") {
+        child.writeServerMessage({
+          id: message.id,
+          result: {
+            data: [
+              { id: "gpt-visible", model: "gpt-visible", displayName: "Visible", hidden: false },
+              { id: "gpt-hidden", model: "gpt-hidden", displayName: "Hidden", hidden: true },
+            ],
+            nextCursor: null,
+          },
+        })
+      } else if (message.method === "thread/list") {
+        child.writeServerMessage({
+          id: message.id,
+          result: {
+            data: [{ id: "thread-1", name: "Task", preview: "Task", createdAt: 1, updatedAt: 2, turns: [] }],
+            nextCursor: null,
+          },
+        })
+      } else if (message.method === "config/read") {
+        child.writeServerMessage({ id: message.id, result: { config: { model: "gpt-visible" }, layers: ["user"] } })
+      } else if (message.method === "hooks/list") {
+        child.writeServerMessage({
+          id: message.id,
+          result: {
+            data: [{
+              cwd: "/tmp/project",
+              hooks: [{ key: "lint", eventName: "afterTurn", command: "bun lint", sourcePath: "/tmp/hooks.json", source: "user", enabled: true, trustStatus: "trusted" }],
+              warnings: [],
+              errors: [],
+            }],
+          },
+        })
+      } else if (message.method === "skills/list") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { data: [{ cwd: "/tmp/project", skills: [{ name: "demo", description: "Demo", path: "/tmp/demo/SKILL.md", scope: "user", enabled: true }], errors: [] }] },
+        })
+      } else if (message.method === "plugin/list") {
+        child.writeServerMessage({ id: message.id, result: { marketplaces: [], marketplaceLoadErrors: [] } })
+      } else if (message.method === "mcpServerStatus/list") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { data: [{ name: "demo-mcp", authStatus: "notRequired", tools: { ping: {} }, resources: [] }], nextCursor: null },
+        })
+      }
+    })
+    const manager = new CodexAppServerManager({
+      spawnProcess: () => {
+        spawnCount += 1
+        return process as never
+      },
+    })
+
+    const models = await manager.listModels("/tmp/project")
+    const threads = await manager.listThreads("/tmp/project")
+    const management = await manager.readManagementSnapshot("/tmp/project")
+
+    expect(spawnCount).toBe(1)
+    expect(models.map((model) => model.id)).toEqual(["gpt-visible"])
+    expect(threads).toHaveLength(1)
+    expect(threads[0]).toMatchObject({ id: "thread-1", archived: false })
+    expect(management).toMatchObject({
+      cwd: "/tmp/project",
+      config: { model: "gpt-visible" },
+      configLayers: ["user"],
+      skills: [{ name: "demo", enabled: true }],
+      hooks: [{ cwd: "/tmp/project", hooks: [{ key: "lint", command: "bun lint" }] }],
+      mcpServers: [{ name: "demo-mcp", toolCount: 1, resourceCount: 0 }],
+      marketplaces: [],
+      marketplaceLoadErrors: [],
+    })
+    expect(process.messages.filter((message: any) => message.method === "initialize")).toHaveLength(1)
+    manager.stopAll()
+  })
+
+  test("lists every thread across all pages when no limit is supplied", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      id: `thread-${index + 1}`,
+      name: null,
+      preview: `Thread ${index + 1}`,
+      createdAt: index + 1,
+      updatedAt: index + 1,
+      turns: [],
+    }))
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/list") {
+        const cursor = (message.params as { cursor?: string | null }).cursor
+        child.writeServerMessage({
+          id: message.id,
+          result: cursor
+            ? {
+              data: [{
+                id: "thread-101",
+                name: null,
+                preview: "Thread 101",
+                createdAt: 101,
+                updatedAt: 101,
+                turns: [],
+              }],
+              nextCursor: null,
+            }
+            : { data: firstPage, nextCursor: "page-2" },
+        })
+      }
+    })
+    const manager = new CodexAppServerManager({ spawnProcess: () => process as never })
+
+    const threads = await manager.listThreads("/tmp/project")
+
+    expect(threads).toHaveLength(101)
+    expect(threads.at(-1)?.id).toBe("thread-101")
+    expect(process.messages.filter((message: any) => message.method === "thread/list")).toHaveLength(2)
+    manager.stopAll()
   })
 
   test("falls back to thread/start when thread/resume is recoverably missing", async () => {
@@ -505,7 +882,7 @@ describe("CodexAppServerManager", () => {
     })
   })
 
-  test("generateStructured returns the final assistant JSON and stops the transient session", async () => {
+  test("generateStructured returns the final assistant JSON without stopping the shared process", async () => {
     const process = new FakeCodexProcess((message, child) => {
       if (message.method === "initialize") {
         child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
@@ -552,9 +929,12 @@ describe("CodexAppServerManager", () => {
     })
 
     expect(result).toBe("{\"title\":\"Codex title\"}")
-    expect(process.killed).toBe(true)
+    expect(process.killed).toBe(false)
     expect((process.messages.find((message: any) => message.method === "thread/start") as any)?.params.model).toBe("gpt-5.5")
     expect((process.messages.find((message: any) => message.method === "turn/start") as any)?.params.model).toBe("gpt-5.5")
+
+    manager.stopAll()
+    expect(process.killed).toBe(true)
   })
 
   test("maps command execution and agent output into the shared transcript stream", async () => {
@@ -1527,7 +1907,15 @@ describe("CodexAppServerManager", () => {
     expect(toolCall?.entry.kind).toBe("tool_call")
     if (!toolCall || toolCall.entry.kind !== "tool_call") throw new Error("missing tool call")
     expect(toolCall.entry.tool.toolKind).toBe("subagent_task")
-    expect(toolCall.entry.tool.input).toEqual({ subagentType: "spawnAgent" })
+    expect(toolCall.entry.tool.input).toEqual({
+      subagentType: "spawnAgent",
+      senderThreadId: "thread-1",
+      receiverThreadIds: ["thread-2"],
+      prompt: "Inspect tests",
+      agentsStates: {
+        "thread-2": { status: "running", message: "Inspecting" },
+      },
+    })
   })
 
   test("uses the completed webSearch query when the started item is empty", async () => {
@@ -2020,6 +2408,115 @@ describe("CodexAppServerManager", () => {
       id: "approval-1",
       result: {
         decision: "accept",
+      },
+    })
+  })
+
+  test("handles MCP elicitation forms and additional permission approvals", async () => {
+    const process = new FakeCodexProcess((message, child) => {
+      if (message.method === "initialize") {
+        child.writeServerMessage({ id: message.id, result: { userAgent: "codex-test" } })
+      } else if (message.method === "thread/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { thread: { id: "thread-mcp" }, model: "gpt-5.4", reasoningEffort: "high" },
+        })
+      } else if (message.method === "turn/start") {
+        child.writeServerMessage({
+          id: message.id,
+          result: { turn: { id: "turn-mcp", status: "inProgress", error: null } },
+        })
+        child.writeServerMessage({
+          id: "elicitation-1",
+          method: "mcpServer/elicitation/request",
+          params: {
+            threadId: "thread-mcp",
+            turnId: "turn-mcp",
+            serverName: "demo-mcp",
+            mode: "form",
+            message: "Configure access",
+            requestedSchema: {
+              properties: {
+                scopes: { type: "array", title: "Scopes", enum: ["read", "write"] },
+                confirmed: { type: "boolean", title: "Confirm" },
+                retries: { type: "integer", title: "Retries" },
+              },
+            },
+          },
+        })
+      } else if (message.id === "elicitation-1") {
+        child.writeServerMessage({
+          id: "permissions-1",
+          method: "item/permissions/requestApproval",
+          params: {
+            threadId: "thread-mcp",
+            turnId: "turn-mcp",
+            itemId: "permission-item",
+            cwd: "/tmp/project",
+            reason: "The MCP tool needs repository access",
+            permissions: {
+              network: { enabled: true },
+              fileSystem: { read: ["/tmp/project"] },
+            },
+          },
+        })
+      } else if (message.id === "permissions-1") {
+        child.writeServerMessage({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-mcp",
+            turn: { id: "turn-mcp", status: "completed", error: null },
+          },
+        })
+      }
+    })
+    const manager = new CodexAppServerManager({ spawnProcess: () => process as never })
+    await manager.startSession({ chatId: "chat-mcp", cwd: "/tmp/project", model: "gpt-5.4", sessionToken: null })
+
+    const toolIds: string[] = []
+    const turn = await manager.startTurn({
+      chatId: "chat-mcp",
+      model: "gpt-5.4",
+      content: "Use the MCP server",
+      planMode: false,
+      onToolRequest: async ({ tool }) => {
+        toolIds.push(tool.toolId)
+        if (tool.toolId.endsWith(":mcp-action")) {
+          return { answers: { action: "Accept" } }
+        }
+        if (tool.toolId.endsWith(":mcp-form")) {
+          return { answers: { scopes: ["read", "write"], confirmed: "true", retries: "3" } }
+        }
+        if (tool.toolId.endsWith(":permissions")) {
+          return { answers: { approval: "Approve for session" } }
+        }
+        return {}
+      },
+    })
+
+    await collectStream(turn.stream)
+
+    expect(toolIds).toEqual([
+      "elicitation-1:mcp-action",
+      "elicitation-1:mcp-form",
+      "permission-item:permissions",
+    ])
+    expect(process.messages.find((message: any) => message.id === "elicitation-1")).toEqual({
+      id: "elicitation-1",
+      result: {
+        action: "accept",
+        content: { scopes: ["read", "write"], confirmed: true, retries: 3 },
+        _meta: null,
+      },
+    })
+    expect(process.messages.find((message: any) => message.id === "permissions-1")).toEqual({
+      id: "permissions-1",
+      result: {
+        permissions: {
+          network: { enabled: true },
+          fileSystem: { read: ["/tmp/project"] },
+        },
+        scope: "session",
       },
     })
   })

@@ -29,6 +29,7 @@ import {
   DEFAULT_OPENROUTER_SDK_MODEL,
   PROVIDERS,
   type AgentProvider,
+  type CodexManagementSnapshot,
   type InstalledSkillSummary,
   type KeybindingAction,
   type LlmProviderKind,
@@ -86,6 +87,12 @@ const sidebarItems = [
     label: "Skills",
     icon: BookText,
     subtitle: "Manage globally installed agent skills from the active skill lock file.",
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    icon: Code,
+    subtitle: "Manage Codex config, skills, plugins, marketplaces, MCP servers, and hooks.",
   },
   {
     id: "providers",
@@ -766,6 +773,186 @@ export function SkillsSection({
             No skills found.
           </div>
         ) : null}
+      </section>
+    </div>
+  )
+}
+
+function CodexManagementSection({ state }: { state: Pick<KannaState, "connectionStatus" | "navbarLocalPath" | "socket"> }) {
+  const [snapshot, setSnapshot] = useState<CodexManagementSnapshot | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [configKey, setConfigKey] = useState("")
+  const [configValue, setConfigValue] = useState("")
+  const [marketplaceSource, setMarketplaceSource] = useState("")
+  const [oauthUrl, setOauthUrl] = useState<string | null>(null)
+  const cwd = state.navbarLocalPath ?? ""
+
+  async function reload() {
+    if (state.connectionStatus !== "connected" || !cwd) {
+      setSnapshot(null)
+      return
+    }
+    setLoading(true)
+    setError(null)
+    try {
+      setSnapshot(await state.socket.command<CodexManagementSnapshot>({ type: "settings.readCodexManagement", cwd }))
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to read Codex settings.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void reload()
+  }, [cwd, state.connectionStatus, state.socket])
+
+  async function mutate(label: string, command: Parameters<KannaState["socket"]["command"]>[0]) {
+    setBusy(label)
+    setError(null)
+    try {
+      await state.socket.command(command)
+      await reload()
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : `${label} failed.`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (!cwd) {
+    return <div className="rounded-lg border p-4 text-sm text-muted-foreground">Open a project to resolve project-scoped Codex configuration.</div>
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">Effective Codex configuration</div>
+          <div className="truncate font-mono text-xs text-muted-foreground">{cwd}</div>
+        </div>
+        <Button type="button" size="sm" variant="outline" onClick={() => void reload()} disabled={loading || Boolean(busy)}>
+          {loading ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : null}Refresh
+        </Button>
+      </div>
+      {error ? <SkillErrorBlock message={error} /> : null}
+      {oauthUrl ? (
+        <a href={oauthUrl} target="_blank" rel="noopener noreferrer" className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-sm text-primary underline">
+          Continue MCP authorization in a new tab
+        </a>
+      ) : null}
+
+      <section className="space-y-3">
+        <div className="text-sm font-medium">Config</div>
+        <div className="grid gap-2 md:grid-cols-[1fr_1fr_auto]">
+          <Input value={configKey} onChange={(event) => setConfigKey(event.target.value)} placeholder="key.path" />
+          <Input value={configValue} onChange={(event) => setConfigValue(event.target.value)} placeholder='JSON value or text' />
+          <Button type="button" disabled={!configKey.trim() || Boolean(busy)} onClick={() => {
+            let value: unknown = configValue
+            try { value = JSON.parse(configValue) } catch { /* Preserve plain text. */ }
+            void mutate("config", { type: "settings.writeCodexConfig", cwd, keyPath: configKey.trim(), value })
+          }}>Write</Button>
+        </div>
+        <details className="rounded-lg border bg-card/30 p-3">
+          <summary className="cursor-pointer text-sm text-muted-foreground">View effective config and layers</summary>
+          <pre className="mt-3 max-h-96 overflow-auto text-xs">{JSON.stringify({ config: snapshot?.config ?? {}, layers: snapshot?.configLayers ?? [] }, null, 2)}</pre>
+        </details>
+      </section>
+
+      <section className="space-y-3">
+        <div className="text-sm font-medium">Codex skills</div>
+        <div className="grid gap-2 md:grid-cols-2">
+          {(snapshot?.skills ?? []).map((skill) => (
+            <div key={skill.path} className="flex items-start justify-between gap-3 rounded-lg border bg-card/30 p-3">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{skill.name}</div>
+                <div className="line-clamp-2 text-xs text-muted-foreground">{skill.description}</div>
+                <div className="mt-1 text-[10px] uppercase text-muted-foreground">{skill.scope}</div>
+              </div>
+              <Button type="button" size="sm" variant={skill.enabled ? "secondary" : "outline"} disabled={Boolean(busy)} onClick={() => void mutate(`skill:${skill.path}`, {
+                type: "settings.toggleCodexSkill", cwd, path: skill.path, enabled: !skill.enabled,
+              })}>{skill.enabled ? "Enabled" : "Enable"}</Button>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-medium">MCP servers</div>
+          <Button type="button" size="sm" variant="outline" disabled={Boolean(busy)} onClick={() => void mutate("mcp-reload", { type: "settings.reloadCodexMcp", cwd })}>Reload</Button>
+        </div>
+        <div className="grid gap-2 md:grid-cols-2">
+          {(snapshot?.mcpServers ?? []).map((server) => (
+            <div key={server.name} className="flex items-center justify-between gap-3 rounded-lg border bg-card/30 p-3">
+              <div>
+                <div className="text-sm font-medium">{server.name}</div>
+                <div className="text-xs text-muted-foreground">{server.authStatus} · {server.toolCount} tools · {server.resourceCount} resources</div>
+              </div>
+              {server.authStatus === "notLoggedIn" ? (
+                <Button type="button" size="sm" disabled={Boolean(busy)} onClick={() => {
+                  setBusy(`mcp:${server.name}`)
+                  setError(null)
+                  void state.socket.command<{ authorizationUrl: string }>({ type: "settings.startCodexMcpOauth", cwd, name: server.name })
+                    .then((result) => setOauthUrl(result.authorizationUrl))
+                    .catch((oauthError) => setError(oauthError instanceof Error ? oauthError.message : "MCP authorization failed."))
+                    .finally(() => setBusy(null))
+                }}>Log in</Button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-medium">Marketplaces and plugins</div>
+          <Button type="button" size="sm" variant="outline" disabled={Boolean(busy)} onClick={() => void mutate("marketplace-upgrade", { type: "settings.upgradeCodexMarketplaces", cwd })}>Upgrade all</Button>
+        </div>
+        <div className="flex gap-2">
+          <Input value={marketplaceSource} onChange={(event) => setMarketplaceSource(event.target.value)} placeholder="Marketplace Git URL or local path" />
+          <Button type="button" disabled={!marketplaceSource.trim() || Boolean(busy)} onClick={() => void mutate("marketplace-add", { type: "settings.addCodexMarketplace", cwd, source: marketplaceSource.trim() })}>Add</Button>
+        </div>
+        {(snapshot?.marketplaces ?? []).map((marketplace) => (
+          <div key={marketplace.name} className="rounded-lg border bg-card/30 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium">{marketplace.displayName || marketplace.name}</div>
+                <div className="font-mono text-xs text-muted-foreground">{marketplace.path || "remote catalog"}</div>
+              </div>
+              {marketplace.path ? <Button type="button" size="sm" variant="ghost" disabled={Boolean(busy)} onClick={() => void mutate(`marketplace-remove:${marketplace.name}`, { type: "settings.removeCodexMarketplace", cwd, marketplaceName: marketplace.name })}>Remove</Button> : null}
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-2">
+              {marketplace.plugins.map((plugin) => (
+                <div key={plugin.id} className="flex items-start justify-between gap-3 rounded-md border p-2.5">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{plugin.name}</div>
+                    <div className="line-clamp-2 text-xs text-muted-foreground">{plugin.description || plugin.version || plugin.id}</div>
+                  </div>
+                  <Button type="button" size="sm" variant={plugin.installed ? "secondary" : "default"} disabled={Boolean(busy) || plugin.availability !== "AVAILABLE"} onClick={() => void mutate(`plugin:${plugin.id}`, plugin.installed
+                    ? { type: "settings.uninstallCodexPlugin", cwd, pluginId: plugin.id }
+                    : { type: "settings.installCodexPlugin", cwd, pluginName: plugin.name, marketplacePath: marketplace.path, remoteMarketplaceName: marketplace.path ? null : marketplace.name }
+                  )}>{plugin.installed ? "Uninstall" : "Install"}</Button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </section>
+
+      <section className="space-y-3">
+        <div className="text-sm font-medium">Hooks</div>
+        {(snapshot?.hooks ?? []).flatMap((entry) => entry.hooks).map((hook) => (
+          <div key={hook.key} className="rounded-lg border bg-card/30 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm font-medium">{hook.eventName}</span>
+              <span className="text-xs text-muted-foreground">{hook.enabled ? "enabled" : "disabled"} · {hook.trustStatus}</span>
+            </div>
+            <div className="mt-1 font-mono text-xs text-muted-foreground">{hook.command || hook.sourcePath}</div>
+          </div>
+        ))}
       </section>
     </div>
   )
@@ -1684,6 +1871,10 @@ export function SettingsPage() {
                               handleProviderDefaultModelOptionsChange("codex", { reasoningEffort: change.effort })
                             } else if (change.type === "fastMode") {
                               handleProviderDefaultModelOptionsChange("codex", { fastMode: change.fastMode })
+                            } else if (change.type === "sandboxMode") {
+                              handleProviderDefaultModelOptionsChange("codex", { sandboxMode: change.sandboxMode })
+                            } else if (change.type === "approvalPolicy") {
+                              handleProviderDefaultModelOptionsChange("codex", { approvalPolicy: change.approvalPolicy })
                             }
                           }}
                           planMode={providerDefaults.codex.planMode}
@@ -1818,6 +2009,8 @@ export function SettingsPage() {
                   </div>
                 ) : selectedPage === "skills" ? (
                   <SkillsSection state={state} />
+                ) : selectedPage === "codex" ? (
+                  <CodexManagementSection state={state} />
                 ) : (
                   <ChangelogSection
                     status={changelogStatus}

@@ -950,6 +950,10 @@ export function ChatPage() {
           branchName={state.chatDiffSnapshot?.branchName}
           hasGitRepo={state.chatDiffSnapshot?.status !== "no_repo"}
           gitStatus={state.chatDiffSnapshot?.status}
+          onCreateWorktree={!state.activeWorktree && state.activeChatId && !state.isProcessing ? () => void state.handleCreateWorktree() : undefined}
+          onHandoffToLocal={state.activeWorktree && state.activeChatId && !state.isProcessing ? () => void state.handleHandoffToLocal() : undefined}
+          onRemoveWorktree={state.activeWorktree && state.activeChatId && !state.isProcessing ? () => void state.handleRemoveWorktree() : undefined}
+          onStartReview={state.runtime?.provider === "codex" && !state.isProcessing ? () => void state.handleStartReview() : undefined}
         />
         <ChatGoalPanel
           activeProvider={goalPanelProvider}
@@ -979,12 +983,16 @@ export function ChatPage() {
           onStopDraining={state.handleStopDraining}
           onSteerQueuedMessage={state.handleSteerQueuedMessage}
           onRemoveQueuedMessage={state.handleRemoveQueuedMessage}
+          onUpdateQueuedMessage={state.handleUpdateQueuedMessage}
+          onReorderQueuedMessages={state.handleReorderQueuedMessages}
           onOpenLocalLink={state.handleOpenLocalLink}
           editorPreset={editorPreset}
           editorCommandTemplate={editorCommandTemplate}
           platform={state.localProjects?.machine.platform}
           onAskUserQuestionSubmit={state.handleAskUserQuestion}
           onExitPlanModeConfirm={state.handleExitPlanMode}
+          onOpenSubagent={state.handleOpenSubagent}
+          onStopSubagent={state.handleStopSubagent}
           showScrollButton={showScrollToBottom && state.messages.length > 0}
           onIsAtEndChange={onIsAtEndChange}
           scrollToBottom={() => scrollToTranscriptEnd(true)}

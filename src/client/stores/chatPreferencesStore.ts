@@ -6,7 +6,9 @@ import {
   normalizeClaudeModelId,
   normalizeCodexModelId,
   isClaudeReasoningEffort,
+  isCodexApprovalPolicy,
   isCodexReasoningEffort,
+  isCodexSandboxMode,
   supportsClaudeMaxReasoningEffort,
   type AgentProvider,
   type ChatProviderPreferences,
@@ -138,6 +140,12 @@ export function normalizeCodexPreference(value?: {
       fastMode: typeof value?.modelOptions?.fastMode === "boolean"
         ? value.modelOptions.fastMode
         : DEFAULT_CODEX_MODEL_OPTIONS.fastMode,
+      sandboxMode: isCodexSandboxMode(value?.modelOptions?.sandboxMode)
+        ? value.modelOptions.sandboxMode
+        : DEFAULT_CODEX_MODEL_OPTIONS.sandboxMode,
+      approvalPolicy: isCodexApprovalPolicy(value?.modelOptions?.approvalPolicy)
+        ? value.modelOptions.approvalPolicy
+        : DEFAULT_CODEX_MODEL_OPTIONS.approvalPolicy,
     },
     planMode: Boolean(value?.planMode),
   }
@@ -272,6 +280,8 @@ function sameComposerState(left: ComposerState | undefined, right: ComposerState
   if (left.provider === "codex" && right.provider === "codex") {
     return left.modelOptions.reasoningEffort === right.modelOptions.reasoningEffort
       && left.modelOptions.fastMode === right.modelOptions.fastMode
+      && left.modelOptions.sandboxMode === right.modelOptions.sandboxMode
+      && left.modelOptions.approvalPolicy === right.modelOptions.approvalPolicy
   }
 
   return false

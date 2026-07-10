@@ -132,6 +132,15 @@ describe("processTranscriptMessages", () => {
     expect(messages[0].usage.compactsAutomatically).toBe(true)
   })
 
+  test("keeps only the latest live turn diff per turn", () => {
+    const messages = processTranscriptMessages([
+      { _id: "diff-1", createdAt: 1, kind: "turn_diff", turnId: "turn-1", diff: "old" },
+      { _id: "diff-2", createdAt: 2, kind: "turn_diff", turnId: "turn-1", diff: "new" },
+    ])
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({ kind: "turn_diff", diff: "new" })
+  })
+
   test("preserves structured Claude ask-user-question results when a later echoed tool result arrives", () => {
     const messages = processTranscriptMessages([
       entry({

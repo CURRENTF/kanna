@@ -201,6 +201,26 @@ describe("EventStore", () => {
     expect(reloaded.getQueuedMessages(chat.id).map((message) => message.id)).toEqual([second.id])
   })
 
+  test("persists queued message edits and ordering across restart", async () => {
+    const dataDir = await createTempDataDir()
+    const store = new EventStore(dataDir)
+    await store.initialize()
+    const project = await store.openProject(dataDir, "Queue")
+    const chat = await store.createChat(project.id)
+    const first = await store.enqueueMessage(chat.id, { content: "first", attachments: [] })
+    const second = await store.enqueueMessage(chat.id, { content: "second", attachments: [] })
+
+    await store.updateQueuedMessage(chat.id, first.id, "edited first")
+    await store.reorderQueuedMessages(chat.id, [second.id, first.id])
+
+    const restarted = new EventStore(dataDir)
+    await restarted.initialize()
+    expect(restarted.getQueuedMessages(chat.id).map((message) => message.content)).toEqual([
+      "second",
+      "edited first",
+    ])
+  })
+
   test("marks chats unread on completed turns and clears unread when marked read", async () => {
     const dataDir = await createTempDataDir()
     const store = new EventStore(dataDir)

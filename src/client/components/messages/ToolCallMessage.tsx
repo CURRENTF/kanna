@@ -11,6 +11,8 @@ interface Props {
   message: ProcessedToolCall
   isLoading?: boolean
   localPath?: string | null
+  onOpenSubagent?: (threadId: string) => void
+  onStopSubagent?: (threadId: string) => void
 }
 
 type ReadImageBlock = {
@@ -83,7 +85,7 @@ export function ReadResultImages({ images }: { images: ReadonlyArray<ReadImageBl
   )
 }
 
-export function ToolCallMessage({ message, isLoading = false, localPath }: Props) {
+export function ToolCallMessage({ message, isLoading = false, localPath, onOpenSubagent, onStopSubagent }: Props) {
   const hasResult = message.result !== undefined
   const showLoadingState = !hasResult && isLoading
 
@@ -133,6 +135,24 @@ export function ToolCallMessage({ message, isLoading = false, localPath }: Props
   }, [message.input, message.toolName, localPath])
 
   const isAgent = useMemo(() => message.toolKind === "subagent_task", [message.toolKind])
+  const agentThreads = useMemo(() => {
+    if (message.toolKind !== "subagent_task") return []
+    const result = message.result && typeof message.result === "object" ? message.result as Record<string, unknown> : null
+    const resultStates = result?.agentsStates && typeof result.agentsStates === "object"
+      ? result.agentsStates as Record<string, { status?: string; message?: string | null }>
+      : null
+    const inputStates = message.input.agentsStates ?? {}
+    const states = resultStates ?? inputStates
+    const receiverIds = Array.isArray(result?.receiverThreadIds)
+      ? result.receiverThreadIds.filter((value): value is string => typeof value === "string")
+      : message.input.receiverThreadIds ?? []
+    const ids = [...new Set([...receiverIds, ...Object.keys(states)])]
+    return ids.map((threadId) => ({
+      threadId,
+      status: states[threadId]?.status ?? (showLoadingState ? "running" : "unknown"),
+      message: states[threadId]?.message ?? null,
+    }))
+  }, [message, showLoadingState])
   const description = useMemo(() => {
     if (message.toolKind === "skill") {
       return message.input.skill
@@ -191,6 +211,36 @@ export function ToolCallMessage({ message, isLoading = false, localPath }: Props
         expandedContent={
           <VerticalLineContainer className="my-4 text-sm">
             <div className="flex flex-col gap-2">
+              {isAgent && agentThreads.length > 0 ? (
+                <div className="space-y-2" aria-label="Subagent status">
+                  {agentThreads.map((agent) => {
+                    const canStop = agent.status === "running" || agent.status === "pendingInit"
+                    return (
+                      <div key={agent.threadId} className="rounded-lg border bg-muted/20 p-2.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate font-mono text-xs">{agent.threadId}</div>
+                            <div className="text-xs capitalize text-muted-foreground">{agent.status}</div>
+                          </div>
+                          <div className="flex gap-1.5">
+                            {onOpenSubagent ? (
+                              <button type="button" className="rounded-md border px-2 py-1 text-xs hover:bg-muted" onClick={() => onOpenSubagent(agent.threadId)}>
+                                Open
+                              </button>
+                            ) : null}
+                            {onStopSubagent && canStop ? (
+                              <button type="button" className="rounded-md border border-destructive/30 px-2 py-1 text-xs text-destructive hover:bg-destructive/10" onClick={() => onStopSubagent(agent.threadId)}>
+                                Stop
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                        {agent.message ? <p className="mt-2 whitespace-pre-wrap text-xs text-muted-foreground">{agent.message}</p> : null}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : null}
               {isEditTool ? (
                 <FileContentView
                   content=""

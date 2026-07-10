@@ -5,6 +5,7 @@ import type {
   ChatAttachment,
   CodexGoal,
   CodexGoalStatus,
+  CodexReviewTarget,
   ChatDiffSnapshot,
   ChatHistoryPage,
   ChatSnapshot,
@@ -109,6 +110,16 @@ export type ClientCommand =
       model: string
       baseUrl: string
     }
+  | { type: "settings.readCodexManagement"; cwd: string }
+  | { type: "settings.writeCodexConfig"; cwd: string; keyPath: string; value: unknown }
+  | { type: "settings.toggleCodexSkill"; cwd: string; path: string; enabled: boolean }
+  | { type: "settings.installCodexPlugin"; cwd: string; pluginName: string; marketplacePath?: string | null; remoteMarketplaceName?: string | null }
+  | { type: "settings.uninstallCodexPlugin"; cwd: string; pluginId: string }
+  | { type: "settings.addCodexMarketplace"; cwd: string; source: string }
+  | { type: "settings.removeCodexMarketplace"; cwd: string; marketplaceName: string }
+  | { type: "settings.upgradeCodexMarketplaces"; cwd: string; marketplaceName?: string | null }
+  | { type: "settings.startCodexMcpOauth"; cwd: string; name: string }
+  | { type: "settings.reloadCodexMcp"; cwd: string }
   | {
       type: "system.openExternal"
       localPath: string
@@ -119,6 +130,18 @@ export type ClientCommand =
     }
   | { type: "chat.create"; projectId: string }
   | { type: "chat.fork"; chatId: string }
+  | { type: "chat.createWorktree"; chatId: string; branchName?: string }
+  | { type: "chat.handoffToLocal"; chatId: string }
+  | {
+      type: "chat.review"
+      chatId: string
+      target: CodexReviewTarget
+      model?: string
+      modelOptions?: ModelOptions
+    }
+  | { type: "chat.openSubagent"; chatId: string; threadId: string }
+  | { type: "chat.stopSubagent"; chatId: string; threadId: string }
+  | { type: "project.removeWorktree"; projectId: string }
   | { type: "chat.rename"; chatId: string; title: string }
   | { type: "chat.archive"; chatId: string }
   | { type: "chat.unarchive"; chatId: string }
@@ -244,6 +267,17 @@ export type ClientCommand =
       type: "message.dequeue"
       chatId: string
       queuedMessageId: string
+    }
+  | {
+      type: "message.updateQueued"
+      chatId: string
+      queuedMessageId: string
+      content: string
+    }
+  | {
+      type: "message.reorderQueued"
+      chatId: string
+      queuedMessageIds: string[]
     }
   | { type: "terminal.create"; projectId: string; terminalId: string; cols: number; rows: number; scrollback: number }
   | { type: "terminal.input"; terminalId: string; data: string }

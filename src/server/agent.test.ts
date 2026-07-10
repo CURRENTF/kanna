@@ -208,6 +208,101 @@ describe("attachment prompt helpers", () => {
 })
 
 describe("AgentCoordinator codex integration", () => {
+  test("requests every active and archived thread without creating a project during synchronization", async () => {
+    const listCalls: Array<{ cwd: string; archived: boolean; limit: number | undefined }> = []
+    const importedThreads: Array<{ projectId: string; threadId: string }> = []
+    const project = { id: "project-sync", localPath: "/tmp/project-sync", title: "Project Sync" }
+    const fakeCodexManager = {
+      async listThreads(cwd: string, archived: boolean, limit?: number) {
+        listCalls.push({ cwd, archived, limit })
+        if (archived) return []
+        return [{
+          id: "thread-sync-1",
+          name: "Imported task",
+          preview: "Imported task",
+          createdAt: 1,
+          updatedAt: 2,
+          archived: false,
+          turns: [],
+        }]
+      },
+      async readThreads() {
+        return []
+      },
+    }
+    const fakeStore = {
+      getChatBySessionToken() {
+        return null
+      },
+      async importCodexThread(args: { projectId: string; threadId: string }) {
+        importedThreads.push({ projectId: args.projectId, threadId: args.threadId })
+        return { id: `codex-${args.threadId}` }
+      },
+    }
+    const coordinator = new AgentCoordinator({
+      store: fakeStore as never,
+      onStateChange: () => {},
+      codexManager: fakeCodexManager as never,
+    })
+
+    const result = await coordinator.syncCodexThreads([{
+      id: project.id,
+      localPath: project.localPath,
+    }])
+
+    expect(listCalls).toEqual([
+      { cwd: project.localPath, archived: false, limit: undefined },
+      { cwd: project.localPath, archived: true, limit: undefined },
+    ])
+    expect(importedThreads).toEqual([{ projectId: project.id, threadId: "thread-sync-1" }])
+    expect(result).toEqual({ imported: 1, errors: [] })
+  })
+
+  test("does not hydrate or re-import Codex threads that are already known", async () => {
+    let readThreadsCalls = 0
+    let importCalls = 0
+    const fakeCodexManager = {
+      async listThreads(_cwd: string, archived: boolean) {
+        if (archived) return []
+        return [{
+          id: "thread-known",
+          name: "Known task",
+          preview: "Known task",
+          createdAt: 1,
+          updatedAt: 2,
+          archived: false,
+          turns: [],
+        }]
+      },
+      async readThreads() {
+        readThreadsCalls += 1
+        return []
+      },
+    }
+    const fakeStore = {
+      getChatBySessionToken(threadId: string) {
+        return threadId === "thread-known" ? { id: "codex-thread-known", hasMessages: true } : null
+      },
+      async importCodexThread() {
+        importCalls += 1
+      },
+    }
+    const coordinator = new AgentCoordinator({
+      store: fakeStore as never,
+      onStateChange: () => {},
+      codexManager: fakeCodexManager as never,
+    })
+
+    const result = await coordinator.syncCodexThreads([{
+      id: "project-known",
+      localPath: "/tmp/project-known",
+    }])
+
+    expect(readThreadsCalls).toBe(0)
+    expect(importCalls).toBe(0)
+    expect(result).toEqual({ imported: 0, errors: [] })
+  })
+
   test("generates a chat title in the background on the first user message", async () => {
     let releaseTitle!: () => void
     const titleGate = new Promise<void>((resolve) => {
@@ -1245,6 +1340,96 @@ describe("AgentCoordinator codex integration", () => {
     }
     expect(discardedResult.content).toEqual({ discarded: true })
     expect(startTurnCalls).toEqual(["plan this"])
+  })
+  test("starts native Codex review turns through the coordinator", async () => {
+    const reviewCalls: any[] = []
+    const sessionCalls: any[] = []
+    const fakeCodexManager = {
+      async startSession(args: unknown) {
+        sessionCalls.push(args)
+        return "thread-review"
+      },
+      async startReview(args: any): Promise<HarnessTurn> {
+        reviewCalls.push(args)
+        async function* stream() {
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "system_init",
+              provider: "codex",
+              model: args.model,
+              tools: [],
+              agents: [],
+              slashCommands: [],
+              mcpServers: [],
+            }),
+          }
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "result",
+              subtype: "success",
+              isError: false,
+              durationMs: 1,
+              result: "review complete",
+            }),
+          }
+        }
+        return {
+          provider: "codex",
+          stream: stream(),
+          interrupt: async () => {},
+          close: () => {},
+        }
+      },
+      async startTurn() {
+        throw new Error("review should not use turn/start")
+      },
+    }
+    const store = createFakeStore()
+    store.chat.provider = "codex"
+    store.chat.sessionToken = "thread-review"
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      codexManager: fakeCodexManager as never,
+    })
+
+    await coordinator.review({
+      type: "chat.review",
+      chatId: "chat-1",
+      target: { type: "baseBranch", branch: "main" },
+      model: "gpt-5.4",
+      modelOptions: {
+        codex: {
+          reasoningEffort: "high",
+          fastMode: false,
+          approvalPolicy: "on-request",
+          sandboxMode: "workspace-write",
+        },
+      },
+    })
+    await waitFor(() => store.turnFinishedCount === 1)
+
+    expect(sessionCalls).toHaveLength(1)
+    expect(sessionCalls[0]).toMatchObject({
+      chatId: "chat-1",
+      cwd: "/tmp/project",
+      model: "gpt-5.4",
+      sessionToken: "thread-review",
+      approvalPolicy: "on-request",
+      sandboxMode: "workspace-write",
+    })
+    expect(reviewCalls).toHaveLength(1)
+    expect(reviewCalls[0]).toMatchObject({
+      chatId: "chat-1",
+      model: "gpt-5.4",
+      target: { type: "baseBranch", branch: "main" },
+    })
+    expect(store.messages).toContainEqual(expect.objectContaining({
+      kind: "user_prompt",
+      content: "Review changes against main",
+    }))
   })
 })
 

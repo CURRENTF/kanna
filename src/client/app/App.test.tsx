@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { getAppAuthStateFromStatus, shouldPlayChatNotificationSound, shouldRedirectToChangelog, shouldRetryAuthStatusRequest } from "./App"
+import { getAppAuthStateFromStatus, getLoginErrorMessage, shouldPlayChatNotificationSound, shouldRedirectToChangelog, shouldRetryAuthStatusRequest } from "./App"
 import { getChatNotificationSnapshot, getChatSoundBurstCount, getNotificationTitleCount } from "./chatNotifications"
 import { DEFAULT_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, clampSidebarWidth } from "./KannaSidebar"
 import { isBrowserUnfocused, shouldPlayChatSound } from "../lib/chatSounds"
@@ -51,6 +51,11 @@ describe("auth boot helpers", () => {
     expect(shouldRetryAuthStatusRequest(null)).toBe(true)
     expect(shouldRetryAuthStatusRequest(false)).toBe(true)
     expect(shouldRetryAuthStatusRequest(true)).toBe(false)
+  })
+
+  test("distinguishes rate limiting from an incorrect password", () => {
+    expect(getLoginErrorMessage(401)).toBe("Incorrect password. Try again.")
+    expect(getLoginErrorMessage(429)).toBe("Too many login attempts. Try again in one minute.")
   })
 })
 

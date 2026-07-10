@@ -125,6 +125,7 @@ export function deriveSidebarData(
       realTitle: project.title,
       ...(project.sidebarTitle ? { sidebarTitle: project.sidebarTitle } : {}),
       localPath: project.localPath,
+      ...(project.worktree ? { worktree: { ...project.worktree } } : {}),
       chats,
       previewChats,
       olderChats,
@@ -167,6 +168,7 @@ export function deriveLocalProjectsSnapshot(
       source: "saved",
       lastOpenedAt,
       chatCount: chats.length,
+      ...(project.worktree ? { worktree: { ...project.worktree } } : {}),
     })
   }
 

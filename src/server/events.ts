@@ -47,6 +47,7 @@ export type ProjectEvent = {
   projectId: string
   localPath: string
   title: string
+  worktree?: ProjectSummary["worktree"]
 } | {
   v: 2
   type: "project_sidebar_renamed"
@@ -61,6 +62,20 @@ export type ProjectEvent = {
 }
 
 export type ChatEvent =
+  | {
+      v: 2
+      type: "codex_thread_imported"
+      timestamp: number
+      chatId: string
+      projectId: string
+      title: string
+      createdAt: number
+      updatedAt: number
+      sessionToken: string
+      archived: boolean
+      hasMessages: boolean
+      lastTurnOutcome: "success" | "failed" | "cancelled" | null
+    }
   | {
       v: 2
       type: "chat_created"
@@ -138,6 +153,21 @@ export type QueuedMessageEvent =
       timestamp: number
       chatId: string
       queuedMessageId: string
+    }
+  | {
+      v: 2
+      type: "queued_message_updated"
+      timestamp: number
+      chatId: string
+      queuedMessageId: string
+      content: string
+    }
+  | {
+      v: 2
+      type: "queued_messages_reordered"
+      timestamp: number
+      chatId: string
+      queuedMessageIds: string[]
     }
 
 export type TurnEvent =

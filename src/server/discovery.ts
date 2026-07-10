@@ -225,10 +225,15 @@ function readCodexSessionMetadata(sessionsDir: string) {
 export class CodexProjectDiscoveryAdapter implements ProjectDiscoveryAdapter {
   readonly provider = "codex" as const
 
+  constructor(private readonly codexHomeDir?: string) {}
+
   scan(homeDir: string = homedir()): ProviderDiscoveredProject[] {
-    const indexPath = path.join(homeDir, ".codex", "session_index.jsonl")
-    const sessionsDir = path.join(homeDir, ".codex", "sessions")
-    const configPath = path.join(homeDir, ".codex", "config.toml")
+    const codexHomeDir = this.codexHomeDir?.trim()
+      ? path.resolve(this.codexHomeDir.trim())
+      : path.join(homeDir, ".codex")
+    const indexPath = path.join(codexHomeDir, "session_index.jsonl")
+    const sessionsDir = path.join(codexHomeDir, "sessions")
+    const configPath = path.join(codexHomeDir, "config.toml")
     const updatedAtById = readCodexSessionIndex(indexPath)
     const metadataById = readCodexSessionMetadata(sessionsDir)
     const configuredProjects = readCodexConfiguredProjects(configPath)
@@ -286,7 +291,7 @@ export class CodexProjectDiscoveryAdapter implements ProjectDiscoveryAdapter {
 
 export const DEFAULT_PROJECT_DISCOVERY_ADAPTERS: ProjectDiscoveryAdapter[] = [
   new ClaudeProjectDiscoveryAdapter(),
-  new CodexProjectDiscoveryAdapter(),
+  new CodexProjectDiscoveryAdapter(process.env.CODEX_HOME),
 ]
 
 export function discoverProjects(

@@ -64,7 +64,12 @@ describe("migrateChatPreferencesState", () => {
         },
         codex: {
           model: "gpt-5.5",
-          modelOptions: { reasoningEffort: "minimal", fastMode: true },
+          modelOptions: {
+            reasoningEffort: "minimal",
+            fastMode: true,
+            sandboxMode: "workspace-write",
+            approvalPolicy: "on-request",
+          },
           planMode: false,
         },
       },
@@ -121,7 +126,12 @@ describe("migrateChatPreferencesState", () => {
 
     expect(migrated.providerDefaults.codex).toEqual({
       model: "gpt-5.5",
-      modelOptions: { reasoningEffort: "low", fastMode: true },
+      modelOptions: {
+        reasoningEffort: "low",
+        fastMode: true,
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
+      },
       planMode: false,
     })
   })
@@ -154,19 +164,34 @@ describe("migrateChatPreferencesState", () => {
 
     expect(migrated.providerDefaults.codex).toEqual({
       model: "gpt-5.5",
-      modelOptions: { reasoningEffort: "low", fastMode: true },
+      modelOptions: {
+        reasoningEffort: "low",
+        fastMode: true,
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
+      },
       planMode: true,
     })
     expect(migrated.chatStates.chatA).toEqual({
       provider: "codex",
       model: "gpt-5.5",
-      modelOptions: { reasoningEffort: "medium", fastMode: false },
+      modelOptions: {
+        reasoningEffort: "medium",
+        fastMode: false,
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
+      },
       planMode: false,
     })
     expect(migrated.legacyComposerState).toEqual({
       provider: "codex",
       model: "gpt-5.5",
-      modelOptions: { reasoningEffort: "xhigh", fastMode: true },
+      modelOptions: {
+        reasoningEffort: "xhigh",
+        fastMode: true,
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
+      },
       planMode: true,
     })
   })
@@ -176,7 +201,12 @@ describe("chat preference store", () => {
   test("starts with gpt-5.5 as the default Codex model", () => {
     expect(INITIAL_STATE.providerDefaults.codex).toEqual({
       model: "gpt-5.5",
-      modelOptions: { reasoningEffort: "high", fastMode: false },
+      modelOptions: {
+        reasoningEffort: "high",
+        fastMode: false,
+        sandboxMode: "workspace-write",
+        approvalPolicy: "on-request",
+      },
       planMode: false,
     })
   })

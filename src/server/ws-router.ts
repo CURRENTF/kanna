@@ -20,6 +20,7 @@ import { readProjectQuickActions, writeProjectQuickActions } from "./project-qui
 import { writeStandaloneTranscriptExport } from "./standalone-export"
 import { TerminalManager } from "./terminal-manager"
 import type { UpdateManager } from "./update-manager"
+import { WorktreeManager } from "./worktree-manager"
 import { deriveChatSnapshot, deriveLocalProjectsSnapshot, deriveSidebarData } from "./read-models"
 import type {
   AppSettingsPatch,
@@ -132,6 +133,7 @@ interface CreateWsRouterArgs {
   getDiscoveredProjects: () => DiscoveredProject[]
   machineDisplayName: string
   updateManager: UpdateManager | null
+  worktreeManager?: Pick<WorktreeManager, "createForProject" | "remove">
 }
 
 interface SnapshotBroadcastFilter {
@@ -386,6 +388,7 @@ export function createWsRouter({
   getDiscoveredProjects,
   machineDisplayName,
   updateManager,
+  worktreeManager,
 }: CreateWsRouterArgs) {
   const sockets = new Set<ServerWebSocket<ClientState>>()
   let pendingBroadcastTimer: ReturnType<typeof setTimeout> | null = null
@@ -409,6 +412,10 @@ export function createWsRouter({
     discardFile: async () => ({ snapshotChanged: false }),
     ignoreFile: async () => ({ snapshotChanged: false }),
     readPatch: async () => ({ patch: "" }),
+  }
+  const resolvedWorktreeManager = worktreeManager ?? {
+    createForProject: async () => { throw new Error("Worktree management is unavailable") },
+    remove: async () => { throw new Error("Worktree management is unavailable") },
   }
   const resolvedLlmProvider = llmProvider ?? {
     read: async () => ({
@@ -1161,6 +1168,46 @@ export function createWsRouter({
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
           return
         }
+        case "settings.readCodexManagement": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.readCodexManagement(command.cwd) })
+          return
+        }
+        case "settings.writeCodexConfig": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.writeCodexConfig(command.cwd, command.keyPath, command.value) })
+          return
+        }
+        case "settings.toggleCodexSkill": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.toggleCodexSkill(command.cwd, command.path, command.enabled) })
+          return
+        }
+        case "settings.installCodexPlugin": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.installCodexPlugin(command.cwd, command) })
+          return
+        }
+        case "settings.uninstallCodexPlugin": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.uninstallCodexPlugin(command.cwd, command.pluginId) })
+          return
+        }
+        case "settings.addCodexMarketplace": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.addCodexMarketplace(command.cwd, command.source) })
+          return
+        }
+        case "settings.removeCodexMarketplace": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.removeCodexMarketplace(command.cwd, command.marketplaceName) })
+          return
+        }
+        case "settings.upgradeCodexMarketplaces": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.upgradeCodexMarketplaces(command.cwd, command.marketplaceName) })
+          return
+        }
+        case "settings.startCodexMcpOauth": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.startCodexMcpOauth(command.cwd, command.name) })
+          return
+        }
+        case "settings.reloadCodexMcp": {
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: await agent.reloadCodexMcp(command.cwd) })
+          return
+        }
         case "skills.search": {
           const snapshot = await searchSkills(command.query, command.limit)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: snapshot })
@@ -1254,28 +1301,88 @@ export function createWsRouter({
           await broadcastFilteredSnapshots({ includeSidebar: true })
           return
         }
+        case "chat.createWorktree": {
+          const chat = store.requireChat(command.chatId)
+          const sourceProject = store.getProject(chat.projectId)
+          if (!sourceProject) throw new Error("Project not found")
+          const created = await resolvedWorktreeManager.createForProject(sourceProject, chat.title, command.branchName)
+          try {
+            const result = await agent.forkChat(command.chatId, created.project.id)
+            send(ws, {
+              v: PROTOCOL_VERSION,
+              type: "ack",
+              id,
+              result: {
+                ...result,
+                projectId: created.project.id,
+                localPath: created.project.localPath,
+                branchName: created.worktree.branchName,
+              },
+            })
+          } catch (error) {
+            await resolvedWorktreeManager.remove(created.project, { force: true })
+            throw error
+          }
+          await broadcastFilteredSnapshots({ includeSidebar: true, includeLocalProjects: true })
+          return
+        }
+        case "chat.handoffToLocal": {
+          const chat = store.requireChat(command.chatId)
+          const project = store.getProject(chat.projectId)
+          if (!project?.worktree) throw new Error("Chat is not in a managed worktree")
+          const baseProject = store.getProject(project.worktree.baseProjectId)
+            ?? await store.openProject(project.worktree.basePath)
+          const result = await agent.forkChat(command.chatId, baseProject.id)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result: { ...result, projectId: baseProject.id } })
+          await broadcastFilteredSnapshots({ includeSidebar: true, includeLocalProjects: true })
+          return
+        }
+        case "chat.review": {
+          await agent.review(command)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
+          await broadcastChatAndSidebar(command.chatId)
+          return
+        }
+        case "chat.openSubagent": {
+          const result = await agent.openSubagentThread(command.chatId, command.threadId)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          await broadcastFilteredSnapshots({ includeSidebar: true })
+          return
+        }
+        case "chat.stopSubagent": {
+          const result = await agent.stopSubagentThread(command.chatId, command.threadId)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          return
+        }
+        case "project.removeWorktree": {
+          const project = store.getProject(command.projectId)
+          if (!project) throw new Error("Project not found")
+          agent.prepareProjectRemoval(project.id)
+          const result = await resolvedWorktreeManager.remove(project)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          await broadcastFilteredSnapshots({ includeSidebar: true, includeLocalProjects: true })
+          return
+        }
         case "chat.rename": {
-          await store.renameChat(command.chatId, command.title)
+          await agent.renameChat(command.chatId, command.title)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
           await broadcastChatAndSidebar(command.chatId)
           return
         }
         case "chat.archive": {
-          await store.archiveChat(command.chatId)
+          await agent.archiveChat(command.chatId)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
           await broadcastFilteredSnapshots({ includeSidebar: true })
           return
         }
         case "chat.unarchive": {
-          await store.unarchiveChat(command.chatId)
+          await agent.unarchiveChat(command.chatId)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
           await broadcastChatAndSidebar(command.chatId)
           return
         }
         case "chat.delete": {
-          await agent.cancel(command.chatId)
-          await agent.closeChat(command.chatId)
-          await store.deleteChat(command.chatId)
+          await agent.deleteChat(command.chatId)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
           resolvedAnalytics.track("chat_deleted")
           await broadcastFilteredSnapshots({ includeSidebar: true })
@@ -1553,6 +1660,18 @@ export function createWsRouter({
         case "message.dequeue": {
           await agent.dequeue(command)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
+          await broadcastChatAndSidebar(command.chatId)
+          return
+        }
+        case "message.updateQueued": {
+          const result = await agent.updateQueued(command)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          await broadcastChatAndSidebar(command.chatId)
+          return
+        }
+        case "message.reorderQueued": {
+          const result = await agent.reorderQueued(command)
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
           await broadcastChatAndSidebar(command.chatId)
           return
         }

@@ -41,6 +41,9 @@ function getStructuredToolResultFromDebug(entry: Extract<TranscriptEntry, { kind
 
 export function processTranscriptMessages(entries: TranscriptEntry[]): HydratedTranscriptMessage[] {
   const pendingToolCalls = new Map<string, { hydrated: HydratedToolCall; normalized: NormalizedToolCall }>()
+  const streamedAssistantIndexes = new Map<string, number>()
+  const reasoningSummaryIndexes = new Map<string, number>()
+  const turnDiffIndexes = new Map<string, number>()
   const messages: HydratedTranscriptMessage[] = []
 
   for (const entry of entries) {
@@ -75,12 +78,59 @@ export function processTranscriptMessages(entries: TranscriptEntry[]): HydratedT
         })
         break
       case "assistant_text":
-        messages.push({
-          ...createBaseMessage(entry),
-          kind: "assistant_text",
-          text: entry.text,
-        })
+        if (entry.itemId && streamedAssistantIndexes.has(entry.itemId)) {
+          const index = streamedAssistantIndexes.get(entry.itemId)!
+          const current = messages[index]
+          if (current?.kind === "assistant_text") {
+            messages[index] = { ...current, text: entry.text }
+          }
+        } else {
+          messages.push({
+            ...createBaseMessage(entry),
+            kind: "assistant_text",
+            text: entry.text,
+          })
+        }
         break
+      case "assistant_text_delta": {
+        const existingIndex = streamedAssistantIndexes.get(entry.itemId)
+        if (existingIndex !== undefined) {
+          const current = messages[existingIndex]
+          if (current?.kind === "assistant_text") {
+            messages[existingIndex] = { ...current, text: `${current.text}${entry.delta}` }
+          }
+        } else {
+          streamedAssistantIndexes.set(entry.itemId, messages.length)
+          messages.push({ ...createBaseMessage(entry), kind: "assistant_text", text: entry.delta })
+        }
+        break
+      }
+      case "reasoning_summary_delta": {
+        const existingIndex = reasoningSummaryIndexes.get(entry.itemId)
+        if (existingIndex !== undefined) {
+          const current = messages[existingIndex]
+          if (current?.kind === "reasoning_summary") {
+            messages[existingIndex] = { ...current, text: `${current.text}${entry.delta}` }
+          }
+        } else {
+          reasoningSummaryIndexes.set(entry.itemId, messages.length)
+          messages.push({ ...createBaseMessage(entry), kind: "reasoning_summary", text: entry.delta })
+        }
+        break
+      }
+      case "turn_diff": {
+        const existingIndex = turnDiffIndexes.get(entry.turnId)
+        if (existingIndex !== undefined) {
+          const current = messages[existingIndex]
+          if (current?.kind === "turn_diff") {
+            messages[existingIndex] = { ...current, diff: entry.diff }
+          }
+        } else {
+          turnDiffIndexes.set(entry.turnId, messages.length)
+          messages.push({ ...createBaseMessage(entry), kind: "turn_diff", turnId: entry.turnId, diff: entry.diff })
+        }
+        break
+      }
       case "tool_call": {
         const toolCall = hydrateToolCall(entry)
         pendingToolCalls.set(entry.tool.toolId, { hydrated: toolCall, normalized: entry.tool })
