@@ -1,0 +1,9 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - img [ref=e7]
+      - heading "Kanna" [level=3] [ref=e15]
+    - paragraph [ref=e16]: Enter your password to continue.
+  - generic [ref=e18]:
+    - textbox "Password" [ref=e19]
+    - button "Unlock" [disabled]

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import {
   BookText,
   Command,
@@ -993,6 +993,7 @@ export function SettingsPage() {
   const navigate = useNavigate()
   const { sectionId } = useParams<{ sectionId: string }>()
   const state = useOutletContext<KannaState>()
+  const mobileSettingsNavRef = useRef<HTMLDivElement | null>(null)
   const { theme, setTheme } = useTheme()
   const [changelogStatus, setChangelogStatus] = useState<ChangelogStatus>("idle")
   const [signingOut, setSigningOut] = useState(false)
@@ -1104,6 +1105,12 @@ export function SettingsPage() {
     if (resolveSettingsSectionId(sectionId)) return
     navigate("/settings/general", { replace: true })
   }, [navigate, sectionId])
+
+  useEffect(() => {
+    const container = mobileSettingsNavRef.current
+    const activeTab = container?.querySelector<HTMLElement>("[data-active-settings-tab='true']")
+    activeTab?.scrollIntoView({ block: "nearest", inline: "center" })
+  }, [selectedPage])
 
   useEffect(() => {
     let cancelled = false
@@ -1473,23 +1480,27 @@ export function SettingsPage() {
 
         <div className="min-w-0 flex-1 overflow-y-auto">
           <div className="border-b border-border py-2 md:hidden">
-            <div className="overflow-x-auto pr-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div
+              ref={mobileSettingsNavRef}
+              className="overflow-x-auto pr-4 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            >
               <div className="flex min-w-max items-center gap-2">
-                <div className=" sticky left-0 bg-gradient-to-r from-background via-background/80 to-transparent px-2  py-1">
-                <button
-                  type="button"
-                  onClick={state.openSidebar}
-                  className="flex shrink-0 items-center p-2 text-sm text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-                  aria-label="Open sidebar"
-                  title="Open sidebar"
-                >
-                  <Menu className="h-4 w-4 shrink-0" />
-                </button>
+                <div className="sticky left-0 bg-gradient-to-r from-background via-background/80 to-transparent px-2 py-1">
+                  <button
+                    type="button"
+                    onClick={state.openSidebar}
+                    className="flex shrink-0 items-center p-2 text-sm text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                    aria-label="Open sidebar"
+                    title="Open sidebar"
+                  >
+                    <Menu className="h-4 w-4 shrink-0" />
+                  </button>
                 </div>
                 {sidebarItems.map((item) => (
                   <button
                     key={item.label}
                     type="button"
+                    data-active-settings-tab={item.id === selectedPage}
                     onClick={() => navigate(`/settings/${item.id}`)}
                     className={cn(
                       "flex shrink-0 items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors",
